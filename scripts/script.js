@@ -13349,20 +13349,20 @@ handle_ui.on("js-approve-review", function (evt) {
     if (hasClass(self, "can-adopt")) {
         grid.append($e("button", {type: "button", name: "adoptsubmit", class: "btn-primary big"}, "Adopt and submit"),
             $e("p", null, "Submit a copy of this review under your own name. You can make changes afterwards."),
-            $e("button", {type: "button", name: "adoptdraft", class: "bug"}, "Adopt as draft"),
+            $e("button", {type: "button", name: "adoptdraft", class: "bug", disabled: true, title: "This option has been disabled. Please use 'Adopt and submit' instead."}, "Adopt as draft"),
             $e("p", null, "Save a copy of this review as a draft review under your name."));
     } else if (hasClass(self, "can-adopt-replace")) {
         grid.append($e("button", {type: "button", name: "adoptsubmit", class: "btn-primary big"}, "Adopt and submit"),
             $e("p", null, "Replace your draft review with a copy of this review and submit it. You can make changes afterwards."),
-            $e("button", {type: "button", name: "adoptdraft", class: "big"}, "Adopt as draft"),
+            $e("button", {type: "button", name: "adoptdraft", class: "big", disabled: true, title: "This option has been disabled. Please use 'Adopt and submit' instead."}, "Adopt as draft"),
             $e("p", null, "Replace your draft review with a copy of this review."));
     } else {
         subreviewClass = " btn-primary";
     }
-    grid.append($e("button", {type: "button", name: "approvesubreview", class: "big" + subreviewClass}, "Approve subreview"),
+    grid.append($e("button", {type: "button", name: "approvesubreview", class: "big" + subreviewClass, disabled: true, title: "This option has been disabled. Please use 'Adopt and submit' instead."}, "Approve subreview"),
         $e("p", null, "Approve this review as a subreview. It will not be shown to authors and its scores will not be counted in statistics."));
     if (hasClass(self, "can-approve-submit")) {
-        grid.append($e("button", {type: "button", name: "approvesubmit", class: "big"}, "Submit as full review"),
+        grid.append($e("button", {type: "button", name: "approvesubmit", class: "big", disabled: true, title: "This option has been disabled. Please use 'Adopt and submit' instead."}, "Submit as full review"),
             $e("p", null, "Submit this review as an independent review. It will be shown to authors and its scores will be counted in statistics."));
     }
     const $pu = $popup({near: evt.sidebarTarget || self}).append(grid)
