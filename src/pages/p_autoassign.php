@@ -15,6 +15,10 @@ class Autoassign_Page {
     public $ms;
     /** @var string */
     public $jobid;
+    /** @var string */
+    private $_pcsel_sep;
+    /** @var bool */
+    private $_aset_ok;
 
     function __construct(Contact $user, Qrequest $qreq) {
         assert($user->is_manager());
@@ -45,7 +49,7 @@ class Autoassign_Page {
             $qreq->t = "all";
         }
         $limits = PaperSearch::viewable_manager_limits($this->user);
-        if (!isset($qreq->t) || !in_array($qreq->t, $limits)) {
+        if (!isset($qreq->t) || !in_array($qreq->t, $limits, true)) {
             $qreq->t = $limits[0];
         }
         if (!isset($qreq->q) || trim($qreq->q) === "(All)") {
@@ -157,7 +161,7 @@ class Autoassign_Page {
         $x["a"] = $this->qreq->a ?? "review";
         $pfx = $x["a"] . ":";
         foreach ($this->qreq as $k => $v) {
-            if (in_array($k, ["q", "t", "a", "badpairs"])
+            if (in_array($k, ["q", "t", "a", "badpairs"], true)
                 || str_starts_with($k, "pcc")
                 || (str_starts_with($k, "bp")
                     && $v !== "none")
@@ -271,9 +275,9 @@ class Autoassign_Page {
 
     private function print_bad_pairs() {
         echo '<div class="g"></div><div class="relative"><table id="bptable"><tbody>', "\n";
-        for ($i = 1; $i == 1 || isset($this->qreq["bpa{$i}"]); ++$i) {
+        for ($i = 1; $i === 1 || isset($this->qreq["bpa{$i}"]); ++$i) {
             echo '    <tr><td class="rxcaption nw">';
-            if ($i == 1) {
+            if ($i === 1) {
                 echo '<label class="d-inline-block checki"><span class="checkc">',
                     Ht::checkbox("badpairs", 1, isset($this->qreq["badpairs"])),
                     '</span>Don’t assign</label>';
@@ -289,6 +293,14 @@ class Autoassign_Page {
         }
         echo "</tbody></table></div></div>\n";
         $this->conf->stash_hotcrp_pc($this->user);
+    }
+
+    private function print_pc_selection_link($html, $uids) {
+        if (empty($uids)) {
+            return;
+        }
+        echo $this->_pcsel_sep, Ht::button($html, ["class" => "link ui js-pcsel", "data-uids" => join(" ", $uids)]);
+        $this->_pcsel_sep = ", ";
     }
 
     private function print() {
@@ -372,40 +384,42 @@ class Autoassign_Page {
                 'Use enabled PC members</label></div>';
         }
 
-        echo '<div class="js-radio-focus checki"><label>',
-            '<span class="checkc">', Ht::radio("pctyp", "sel", $qreq->pctyp === "sel"), '</span>',
+        $pclist = [];
+        foreach ($conf->pc_members() as $pc) {
+            $pclist["all"][] = $pc->contactId;
+            if (!$pc->is_dormant()) {
+                $pclist["enabled"][] = $pc->contactId;
+            }
+            foreach (Tagger::split_unpack(strtolower($pc->viewable_tags($this->user))) as $tv) {
+                $pclist[$tv[0]][] = $pc->contactId;
+            }
+        }
+
+        echo '<div class="js-radio-focus js-pcsel-container checki"><label>',
+            '<span class="checkc">', Ht::radio("pctyp", "sel", $qreq->pctyp === "sel", ["class" => "want-pcsel"]), '</span>',
             'Use selected PC members:</label>',
             " &nbsp; (select ";
-        $pctyp_sel = [["all", "all"], ["none", "none"]];
+        $this->_pcsel_sep = "";
+        $this->print_pc_selection_link("all", $pclist["all"]);
+        $this->print_pc_selection_link("none", []);
         if ($this->conf->has_disabled_pc_members()) {
-            $pctyp_sel[] = ["enabled", "enabled"];
+            $this->print_pc_selection_link("enabled", $pclist["enabled"]);
         }
-        $tagsjson = [];
-        foreach ($conf->pc_members() as $pc) {
-            $tagsjson[$pc->contactId] = strtolower($pc->viewable_tags($this->user))
-                . ($pc->is_dormant() ? "" : " enabled#0");
-        }
-        Ht::stash_script("var hotcrp_pc_tags=" . json_encode($tagsjson) . ";");
         foreach ($conf->viewable_user_tags($this->user) as $pctag) {
             if ($pctag !== "pc")
-                $pctyp_sel[] = [$pctag, "#{$pctag}"];
+                $this->print_pc_selection_link("#{$pctag}", $pclist[strtolower($pctag)] ?? []);
         }
-        $pctyp_sel[] = ["__flip__", "flip"];
-        $sep = "";
-        foreach ($pctyp_sel as $pctyp) {
-            echo $sep, "<a class=\"ui js-pcsel-tag\" href=\"#pc_", $pctyp[0], "\">", $pctyp[1], "</a>";
-            $sep = ", ";
-        }
+        $this->print_pc_selection_link("flip", ["flip"]);
         echo ")";
-        Ht::stash_script('$(function(){$("input.js-pcsel-tag").first().trigger("change")});');
+        Ht::stash_script('$(function(){$("input.js-pcsel").first().trigger("change")});');
 
         $summary = [];
         $nrev = AssignmentCountSet::load($this->user, AssignmentCountSet::HAS_REVIEW);
         foreach ($conf->pc_members() as $id => $p) {
             $t = '<div class="ctelt"><label class="checki ctelti"><span class="checkc">'
-                . Ht::checkbox("pcc{$id}", 1, isset($qreq["pcc{$id}"]), [
+                . Ht::checkbox("pcc{$id}", 1, friendly_boolean($qreq["pcc{$id}"]), [
                     "id" => "pcc{$id}", "data-range-type" => "pcc",
-                    "class" => "uic js-range-click js-pcsel-tag"
+                    "class" => "uic js-range-click js-pcsel"
                 ]) . '</span>' . $this->user->reviewer_html_for($p)
                 . $nrev->unparse_counts_for($p)
                 . "</label></div>";
@@ -623,9 +637,14 @@ class Autoassign_Page {
         $asetcolumn = $this->unparse_tentative_assignment($tok);
         gc_collect_cycles();
         Assignment_PaperColumn::print_unparse_display($asetcolumn);
-        echo '<div class="aab aabig btnp">',
-            Ht::submit("submit", "Apply changes", ["class" => "btn-primary"]),
-            Ht::submit("download", "Download assignment file"),
+        echo '<div class="aab aabig btnp">';
+        if ($this->_aset_ok) {
+            echo Ht::submit("submit", "Apply changes", ["class" => "btn-primary"]),
+                Ht::submit("reassign", "Recompute assignment", ["class" => "btn-danger", "hidden" => true]);
+        } else {
+            echo Ht::submit("reassign", "Recompute assignment", ["class" => "btn-primary"]);
+        }
+        echo Ht::submit("download", "Download assignment file"),
             Ht::submit("cancel", "Cancel"),
             '</div></form>';
         $qreq->print_footer();
@@ -700,6 +719,7 @@ class Autoassign_Page {
         $aset = new AssignmentSet($this->user);
         $aset->set_override_conflicts(true);
         $aset->set_search_type($this->qreq->t);
+        $aset->set_confirm_potential_conflicts(true);
         $aset->parse($tok->outputData);
         $tok->unload_output();
 
@@ -713,15 +733,16 @@ class Autoassign_Page {
         $atype = $aset->type_description();
         echo '<h3 class="form-h">Proposed ', $atype ? "{$atype} " : "", 'assignment</h3>';
         echo Ht::fmt_feedback_msg($this->conf, $this->ms);
-        $aset->feedback_msg(AssignmentSet::FEEDBACK_ASSIGN);
-        $this->conf->feedback_msg(
-            MessageItem::marked_note("<0>Select “Apply changes” to make the checked assignments."),
-            MessageItem::inform("<0>Reviewer preferences, if any, are shown as “P#”.")
-        );
+        $aset->feedback_msg(AssignmentSet::FEEDBACK_PROPOSE);
+        if ($aset->has_error()) {
+            echo '<p>Select “Recompute assignment” to try to create a new assignment without errors.</p>';
+        } else {
+            echo '<p class="assignment-summary">Select “Apply changes” below to make the checked assignments.</p>',
+                '<p class="if-assign-potential-conflict" hidden><span class="urgent-note-mark"></span> You’ve confirmed conflicts and must recompute the assignment. Select “Recompute assignment” below.</p>';
+        }
+        $this->_aset_ok = !$aset->has_error();
         return $aset->unparse_paper_column();
     }
-
-
 
 
 /*
@@ -791,11 +812,14 @@ class Autoassign_Page {
 
     function run() {
         // load job
+        if (isset($this->qreq->reassign) || isset($this->qreq->cancel)) {
+            unset($this->qreq->job);
+        }
         if ($this->qreq->job) {
             $this->run_try_job();
         } else if (isset($this->qreq->a)
                    && isset($this->qreq->pctyp)
-                   && isset($this->qreq->assign)
+                   && (isset($this->qreq->assign) || isset($this->qreq->reassign))
                    && $this->qreq->valid_post()) {
             $this->start_job();
         }

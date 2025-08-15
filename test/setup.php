@@ -277,6 +277,8 @@ class Xassert {
     static public $context = null;
     /** @var bool */
     static public $stop = false;
+    /** @var bool */
+    static public $retry = false;
     /** @var ?TestRunner */
     static public $test_runner;
     /** @var array<int,string> */
@@ -336,6 +338,9 @@ class Xassert {
 
     /** @param list<string> $sl */
     static private function fail_message($sl) {
+        if (self::$retry) {
+            return;
+        }
         if (self::$test_runner) {
             self::$test_runner->will_fail();
         }
@@ -410,9 +415,15 @@ class Xassert {
             if (preg_match('/\A[Xx]?assert|\AMailChecker::check|::x?assert/s', $fname)) {
                 continue;
             }
-            $refl = isset($tr["class"]) ? new ReflectionMethod($tr["class"], $tr["function"]) : new ReflectionFunction($tr["function"]);
-            if (PHP_MAJOR_VERSION >= 8 && $refl->getAttributes("SkipLandmark")) {
-                continue;
+            if (PHP_MAJOR_VERSION >= 8 && !str_contains($fname, "{closure")) {
+                if (isset($tr["class"])) {
+                    $refl = new ReflectionMethod($tr["class"], $tr["function"]);
+                } else {
+                    $refl = new ReflectionFunction($tr["function"]);
+                }
+                if ($refl->getAttributes("SkipLandmark")) {
+                    continue;
+                }
             }
             $loc = $fname;
             if (($file = $trace[$pos - 1]["file"] ?? null) !== null) {
@@ -445,6 +456,27 @@ class Xassert {
         }
         return [$first, ""];
     }
+
+    /** @param int $ntries
+     * @param callable $f */
+    static function retry($ntries, $f) {
+        $r = self::$retry;
+        self::$retry = true;
+        while ($ntries > 1) {
+            --$ntries;
+            $n = self::$n;
+            $nsuccess = self::$nsuccess;
+            $f();
+            if (self::$nsuccess === $nsuccess + self::$n - $n) {
+                self::$retry = $r;
+                return;
+            }
+            self::$n = $n;
+            self::$nsuccess = $nsuccess;
+        }
+        self::$retry = $r;
+        $f();
+    }
 }
 
 /** @param int $errno
@@ -452,7 +484,7 @@ class Xassert {
  * @param string $file
  * @param int $line */
 function xassert_error_handler($errno, $emsg, $file, $line) {
-    if ((!error_reporting() && $errno == E_NOTICE)
+    if ((error_reporting() & $errno) === 0
         || Xassert::$disabled > 0) {
         return;
     }
@@ -555,7 +587,7 @@ function xassert_in_eqq($member, $list) {
     if ($ok) {
         Xassert::succeed();
     } else {
-        Xassert::fail_match("expected ", $member, " ∈ ", $list);
+        Xassert::fail_match("expected ∈ ", $list, ", got ", $member);
     }
     return $ok;
 }
@@ -575,7 +607,7 @@ function xassert_not_in_eqq($member, $list) {
     if ($ok) {
         Xassert::succeed();
     } else {
-        Xassert::fail_match("expected ", $member, " ∉ ", $list);
+        Xassert::fail_match("expected ∉ ", $list, ", got ", $member);
     }
     return $ok;
 }
@@ -692,7 +724,7 @@ function xassert_not_str_contains($haystack, $needle) {
     if ($ok) {
         Xassert::succeed();
     } else {
-        Xassert::fail_with("Expected `{$haystack}` not to contain `{$needle}`");
+        Xassert::fail_with("Expected `{$haystack}` to not contain `{$needle}`");
     }
     return $ok;
 }
@@ -707,7 +739,7 @@ function xassert_array_eqq($actual, $expected, $sort = false) {
         if (count($actual) !== count($expected)
             && !$sort) {
             $problem = "expected size " . count($expected) . ", got " . count($actual);
-        } else if (is_associative_array($actual) || is_associative_array($expected)) {
+        } else if (!array_is_list($actual) || !array_is_list($expected)) {
             $problem = "associative arrays";
         } else {
             if ($sort) {
@@ -1255,7 +1287,7 @@ class TestRunner {
         $us = new UserStatus($conf->root_user());
         $ok = true;
         foreach ($json->contacts as $c) {
-            $us->set_notify(in_array("pc", $c->roles ?? []));
+            $us->set_notify(in_array("pc", $c->roles ?? [], true));
             $user = $us->save_user($c);
             if ($user) {
                 MailChecker::check_db("create-{$c->email}");

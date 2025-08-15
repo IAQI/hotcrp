@@ -223,30 +223,23 @@ class Qrequest implements ArrayAccess, IteratorAggregate, Countable, JsonSeriali
         if ($this->_body_file !== null || $this->_body_type === self::BODY_NONE) {
             return $this->_body_file;
         }
-        if (!($tmpdir = tempdir())) {
-            return null;
-        }
         $extension = $extension ?? Mimetype::extension($this->header("Content-Type"));
-        $f = $fn = null;
-        for ($n = 0; $n !== 5 && !$f; ++$n) {
-            $fn = $tmpdir . "/" . strtolower(encode_token(random_bytes(6))) . $extension;
-            $f = @fopen($fn, "xb");
-        }
-        if (!$f) {
+        $finfo = Filer::create_tempfile(null, "reqbody-%s{$extension}", 5);
+        if (!$finfo) {
             return null;
         }
         if ($this->_body === null) {
             $if = fopen("php://input", "rb");
-            $nc = stream_copy_to_stream($if, $f);
+            $nc = stream_copy_to_stream($if, $finfo[1]);
             fclose($if);
             $ok = $nc !== false;
         } else {
-            $nc = fwrite($f, $this->_body);
+            $nc = fwrite($finfo[1], $this->_body);
             $ok = $nc === strlen($this->_body);
         }
-        fclose($f);
+        fclose($finfo[1]);
         if ($ok) {
-            $this->_body_file = $fn;
+            $this->_body_file = $finfo[0];
         } else {
             $this->_body_type = self::BODY_NONE;
         }
@@ -547,20 +540,21 @@ class Qrequest implements ArrayAccess, IteratorAggregate, Countable, JsonSeriali
      * @return ?bool */
     function xt_allow($e) {
         if ($e === "post") {
-            return $this->_post_ok && $this->_method === "POST";
+            return $this->_post_ok
+                && $this->_method === "POST";
         } else if ($e === "anypost") {
             return $this->_method === "POST";
         } else if ($e === "getpost") {
-            return in_array($this->_method, ["POST", "GET", "HEAD"]) && $this->_post_ok;
+            return $this->_post_ok
+                && in_array($this->_method, ["POST", "GET", "HEAD"], true);
         } else if ($e === "get") {
             return $this->_method === "GET";
         } else if ($e === "head") {
             return $this->_method === "HEAD";
         } else if (str_starts_with($e, "req.")) {
             return $this->has(substr($e, 4));
-        } else {
-            return null;
         }
+        return null;
     }
 
     /** @param ?NavigationState $nav */
@@ -778,9 +772,8 @@ class Qrequest implements ArrayAccess, IteratorAggregate, Countable, JsonSeriali
     function csession($key) {
         if ($this->_conf && $this->_conf->session_key !== null) {
             return $this->_qsession->get2($this->_conf->session_key, $key);
-        } else {
-            return null;
         }
+        return null;
     }
 
     /** @param string $key
@@ -809,11 +802,10 @@ class Qrequest implements ArrayAccess, IteratorAggregate, Countable, JsonSeriali
     /** @return string */
     function maybe_post_value() {
         $sid = $this->_qsession->sid ?? "";
-        if ($sid !== "") {
-            return urlencode(substr($sid, strlen($sid) > 16 ? 8 : 0, 12));
-        } else {
+        if ($sid === "") {
             return ".empty";
         }
+        return urlencode(substr($sid, strlen($sid) > 16 ? 8 : 0, 12));
     }
 
 
@@ -938,8 +930,10 @@ class QrequestFile {
         if ($this->content !== null || $this->stream !== null) {
             return $this;
         }
-        $max = Filer::docstore_tempdir($conf) ? 4 << 20 : 80 << 20;
-        if (($this->size ?? 0) < $max) {
+        $size = $this->size ?? 0;
+        if ($size <= (4 << 20)
+            || ((!$conf || !$conf->docstore_tempdir())
+                && $size <= (80 << 20))) {
             $t = @file_get_contents($this->tmp_name);
             if ($t === false) {
                 return null;
@@ -949,7 +943,11 @@ class QrequestFile {
             $qf->size = strlen($t);
             return $qf;
         }
-        $tfinfo = Filer::docstore_tempfile($template, $conf);
+        $dstempdir = $conf ? $conf->docstore_tempdir() : null;
+        if (!$dstempdir) {
+            return null;
+        }
+        $tfinfo = Filer::create_tempfile($dstempdir, $template);
         if ($tfinfo === null) {
             return null;
         }

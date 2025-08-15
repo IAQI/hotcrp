@@ -111,11 +111,11 @@ class Authorize_Page {
 
     private function handle_request(OAuthClient $client) {
         $scope = trim($this->qreq->scope ?? "");
-        if (!preg_match('/\A[ !#-\x5b\x5d-\x7e]+\z/', $scope)) {
+        if (!preg_match('/\A[ !\#-\x5b\x5d-\x7e]+\z/', $scope)) {
             $this->redirect_error("invalid_scope");
         }
         $scope_list = explode(" ", $scope);
-        if (!in_array("openid", $scope_list)) {
+        if (!in_array("openid", $scope_list, true)) {
             $this->redirect_error("invalid_scope", "Scope `openid` required");
         }
 
@@ -137,7 +137,7 @@ class Authorize_Page {
                 if ($p !== "")
                     $prompts[] = $p;
             }
-            if (in_array("none", $prompts)) {
+            if (in_array("none", $prompts, true)) {
                 $this->redirect_error("interaction_required");
             }
         }
@@ -308,7 +308,7 @@ class Authorize_Page {
         // `redirect_uri` must be present and match a configured value
         if (!isset($this->qreq->redirect_uri)) {
             $this->print_error_exit("<0>Authorization parameter <code>redirect_uri</code> missing");
-        } else if (!in_array($this->qreq->redirect_uri, $client->redirect_uri)) {
+        } else if (!in_array($this->qreq->redirect_uri, $client->redirect_uri, true)) {
             $this->print_error_exit("<0>Invalid authorization parameter <code>redirect_uri</code>");
         }
 

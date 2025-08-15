@@ -1,6 +1,6 @@
 <?php
 // settings/s_submissions.php -- HotCRP settings > submissions page
-// Copyright (c) 2006-2022 Eddie Kohler; see LICENSE.
+// Copyright (c) 2006-2025 Eddie Kohler; see LICENSE.
 
 class Submissions_SettingParser extends SettingParser {
     static function print_open(SettingValues $sv) {

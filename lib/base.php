@@ -12,44 +12,42 @@ function is_number($x) {
 }
 
 /** @param mixed $x
- * @return bool */
+ * @return bool
+ * @deprecated */
 function is_associative_array($x) {
-    // this method is surprisingly fast
-    return is_array($x) && array_values($x) !== $x;
+    return is_array($x) && !array_is_list($x);
 }
 
 /** @param mixed $x
  * @return bool */
 function is_list($x) {
-    return is_array($x) && array_values($x) === $x;
+    return is_array($x) && array_is_list($x);
 }
 
 /** @param mixed $x
  * @return bool */
 function is_int_list($x) {
-    if (is_array($x) && array_values($x) === $x) {
-        foreach ($x as $i) {
-            if (!is_int($i))
-                return false;
-        }
-        return true;
-    } else {
+    if (!is_array($x) || !array_is_list($x)) {
         return false;
     }
+    foreach ($x as $i) {
+        if (!is_int($i))
+            return false;
+    }
+    return true;
 }
 
 /** @param mixed $x
  * @return bool */
 function is_string_list($x) {
-    if (is_array($x) && array_values($x) === $x) {
-        foreach ($x as $i) {
-            if (!is_string($i))
-                return false;
-        }
-        return true;
-    } else {
+    if (!is_array($x) || !array_is_list($x)) {
         return false;
     }
+    foreach ($x as $i) {
+        if (!is_string($i))
+            return false;
+    }
+    return true;
 }
 
 /** @return list */
@@ -578,7 +576,7 @@ function str_list_lower_bound($needle, $haystack) {
 
 /** @param mixed $a */
 function array_to_object_recursive($a) {
-    if (!is_array($a) || !is_associative_array($a)) {
+    if (!is_array($a) || array_is_list($a)) {
         return $a;
     }
     $o = (object) [];
@@ -612,7 +610,7 @@ function object_replace_recursive($a, $b) {
         }
     }
     foreach ($ba as $k => $v) {
-        if (is_object($v) || is_associative_array($v)) {
+        if (is_object($v) || (is_array($v) && !array_is_list($v))) {
             if (!is_object($a->$k ?? null)) {
                 $a->$k = (object) [];
             }
@@ -725,20 +723,20 @@ function rm_rf_tempdir($tempdir) {
 }
 
 /** @param int $mode
- * @return string|false */
+ * @return ?string */
 function tempdir($mode = 0700) {
     $dir = sys_get_temp_dir() ? : "/";
-    while (substr($dir, -1) === "/") {
+    while (str_ends_with($dir, "/")) {
         $dir = substr($dir, 0, -1);
     }
     for ($i = 0; $i !== 100; $i++) {
-        $path = sprintf("%s/hotcrptmp%07d", $dir, mt_rand(0, 9999999));
-        if (mkdir($path, $mode)) {
+        $path = sprintf("%s/hotcrptmp%09d", $dir, mt_rand(0, 999999999));
+        if (@mkdir($path, $mode)) {
             register_shutdown_function("rm_rf_tempdir", $path);
-            return $path;
+            return $path . "/";
         }
     }
-    return false;
+    return null;
 }
 
 

@@ -42,7 +42,6 @@ mkdistdir () {
 mkdistdir <<EOF
 
 .htaccess
-.user.ini
 LICENSE
 NEWS.md
 README.md
@@ -292,6 +291,7 @@ src/contactset.php
 src/databaseidrandomizer.php
 src/decisioninfo.php
 src/decisionset.php
+src/docstore.php
 src/documentfiletree.php
 src/documentinfo.php
 src/documentinfoset.php
@@ -438,6 +438,7 @@ src/papercolumns/pc_preferencelist.php
 src/papercolumns/pc_reviewdelegation.php
 src/papercolumns/pc_reviewerlist.php
 src/papercolumns/pc_shepherd.php
+src/papercolumns/pc_shuffle.php
 src/papercolumns/pc_tag.php
 src/papercolumns/pc_tagreport.php
 src/papercolumns/pc_timestamp.php
@@ -554,6 +555,7 @@ src/settingvalues.php
 src/si.php
 src/siteloader.php
 src/sitype.php
+src/stableidpermutation.php
 src/submissionround.php
 src/tagmessagereport.php
 src/tagrankparser.php

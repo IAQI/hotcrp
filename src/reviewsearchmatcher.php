@@ -308,7 +308,7 @@ class ReviewSearchMatcher extends ContactCountMatcher {
             $this->status = self::COMPLETE;
             $this->sensitivity |= self::HAS_STATUS;
         }
-        if ($this->status & self::PENDINGAPPROVAL) {
+        if (($this->status & self::PENDINGAPPROVAL) !== 0) {
             $this->apply_review_type("ext");
         }
         if ($this->has_contacts()) {
@@ -411,7 +411,7 @@ class ReviewSearchMatcher extends ContactCountMatcher {
             }
         }
         if ($this->round_list !== null
-            && !in_array($rrow->reviewRound, $this->round_list)) {
+            && !in_array($rrow->reviewRound, $this->round_list, true)) {
             // XXX can_view_review_round?
             return false;
         }
@@ -422,7 +422,7 @@ class ReviewSearchMatcher extends ContactCountMatcher {
         }
         if ($this->has_contacts()) {
             if ((!$this->test_contact($rrow->contactId)
-                 && (!$this->tokens || !in_array($rrow->reviewToken, $this->tokens)))
+                 && (!$this->tokens || !in_array($rrow->reviewToken, $this->tokens, true)))
                 || !$user->can_view_review_identity($prow, $rrow)) {
                 return false;
             }

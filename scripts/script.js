@@ -10,19 +10,6 @@ function $$(id) {
     return document.getElementById(id);
 }
 
-function serialize_object(x) {
-    if (typeof x === "string")
-        return x;
-    else if (x) {
-        var k, v, a = [];
-        for (k in x)
-            if ((v = x[k]) != null)
-                a.push(encodeURIComponent(k) + "=" + encodeURIComponent(v));
-        return a.join("&");
-    } else
-        return "";
-}
-
 if (!window.JSON || !window.JSON.parse) {
     window.JSON = {parse: $.parseJSON};
 }
@@ -1478,28 +1465,6 @@ function hoturl_search(url, key, value) {
         return url.substring(0, hash).concat(question < 0 || question > hash ? "?" : "&", key, "=", urlencode(value), url.substring(hash));
 }
 
-function hoturl_find(xv, page_component) {
-    var m;
-    for (var i = 0; i < xv.length; ++i)
-        if ((m = page_component.exec(xv[i]))) {
-            m[0] = i;
-            return m;
-        }
-    return null;
-}
-
-function hoturl_clean(x, page_component, allow_fail) {
-    if (x.last !== false && x.v.length) {
-        var im = hoturl_find(x.v, page_component);
-        if (im) {
-            x.last = im[1];
-            x.t += "/" + im[1];
-            x.v.splice(im[0], 1);
-        } else if (!allow_fail)
-            x.last = false;
-    }
-}
-
 function hoturl_clean_param(x, k, value_match, allow_fail) {
     let v;
     if (x.last === false) {
@@ -1514,7 +1479,6 @@ function hoturl_clean_param(x, k, value_match, allow_fail) {
 }
 
 function hoturl(page, options) {
-    const page1 = page, options1 = options;
     let want_forceShow = false;
     if (siteinfo.site_relative == null || siteinfo.suffix == null) {
         siteinfo.site_relative = siteinfo.suffix = "";
@@ -1616,10 +1580,6 @@ function hoturl(page, options) {
         tail = "?" + paramstr + tail;
     }
     return siteinfo.site_relative + x.t + tail;
-}
-
-function hoturl_html(page, options) {
-    return escape_html(hoturl(page, options));
 }
 
 function make_URL(url, loc) {
@@ -5536,83 +5496,55 @@ handle_ui.on("js-mail-preview-choose", function () {
     toggleClass(this.closest("fieldset"), "mail-preview-unchoose", !this.checked);
 });
 
+handle_ui.on("js-mail-send-phase-0", function () {
+    addClass(document.body, "wait");
+    const sendprep = [];
+    for (const e of this.querySelectorAll("input.js-mail-preview-choose:checked")) {
+        sendprep.push(e.value);
+    }
+    this.elements.sendprep.value = sendprep.join(" ");
+});
+
 handle_ui.on("js-mail-send-phase-1", function () {
-    var send = this.querySelector("button");
+    addClass(document.body, "wait");
+    const send = this.querySelector("button");
     send.disabled = true;
     send.textContent = "Sending mail…";
-    addClass(document.body, "wait");
 });
 
 
 // autoassignment
-(function () {
-function make_pcsel_members(tag) {
-    if (tag === "__flip__")
-        return function () { return !this.checked; };
-    else if (tag === "all")
-        return function () { return true; };
-    else if (tag === "none")
-        return function () { return false; };
-    else {
-        tag = " " + tag.toLowerCase() + "#";
-        return function () {
-            var tlist = window.hotcrp_pc_tags[this.name.substr(3)] || "";
-            return tlist.indexOf(tag) >= 0;
-        };
-    }
-}
-function pcsel_tag(evt) {
-    var $g = $(this).closest(".js-radio-focus");
-    if (this.tagName === "A") {
-        $g.find("input[type=radio]").first().click();
-        var tag = this.hash.substring(4),
-            f = make_pcsel_members(tag),
-            full = true;
-        if (tag !== "all" && tag !== "none" && tag !== "__flip__"
-            && !hasClass(this, "font-weight-bold")) {
-            $g.find("input").each(function () {
-                if (this.name.startsWith("pcc") && !this.checked)
-                    return (full = false);
-            });
-        }
-        $g.find("input").each(function () {
-            if (this.name.startsWith("pcc")) {
-                var on = f.call(this);
-                if (full || on)
-                    this.checked = on;
+handle_ui.on("js-pcsel", function (evt) {
+    const g = this.closest(".js-pcsel-container");
+    if (this.tagName === "A" || this.tagName === "BUTTON") {
+        const radio = g.querySelector(".want-pcsel");
+        radio && radio.click();
+        const uids = this.getAttribute("data-uids"),
+            a = uids.split(" ");
+        let i = 0;
+        for (const e of g.querySelectorAll("input.js-pcsel")) {
+            if (e.name.startsWith("pcc")) {
+                if (uids === "flip")
+                    e.checked = !e.checked;
+                else if (e.name.substring(3) === a[i]) {
+                    e.checked = true;
+                    ++i;
+                } else
+                    e.checked = false;
             }
-        });
+        }
         evt.preventDefault();
     }
-    var tags = [], functions = {}, isall = true;
-    $g.find("a.js-pcsel-tag").each(function () {
-        var tag = this.hash.substring(4);
-        if (tag !== "none") {
-            tags.push(tag);
-            functions[tag] = make_pcsel_members(tag);
-        }
-    });
-    $g.find("input").each(function () {
-        if (this.name.startsWith("pcc") && !this.checked) {
-            isall = false;
-            for (var i = 0; i < tags.length; ) {
-                if (functions[tags[i]].call(this))
-                    tags.splice(i, 1);
-                else
-                    ++i;
-            }
-            return isall || tags.length !== 0;
-        }
-    });
-    $g.find("a.js-pcsel-tag").each(function () {
-        var tag = this.hash.substring(4);
-        if ($.inArray(tag, tags) >= 0 && (tag === "all" || !isall))
-            addClass(this, "font-weight-bold");
-        else
-            removeClass(this, "font-weight-bold");
-    });
-}
-handle_ui.on("js-pcsel-tag", pcsel_tag);
+    const a = [];
+    for (const e of g.querySelectorAll("input.js-pcsel")) {
+        if (e.name.startsWith("pcc") && e.checked)
+            a.push(e.name.substring(3));
+    }
+    const uids = a.join(" ");
+    for (const a of g.querySelectorAll("a.js-pcsel, button.js-pcsel")) {
+        toggleClass(a, "font-weight-bold", a.getAttribute("data-uids") === uids);
+    }
+});
 
 handle_ui.on("badpairs", function () {
     if (this.value !== "none") {
@@ -5635,8 +5567,6 @@ handle_ui.on(".js-badpairs-row", function (evt) {
     evt.preventDefault();
     handle_ui.stopPropagation(evt);
 });
-
-})();
 
 handle_ui.on(".js-autoassign-prepare", function () {
     var k, v, a;
@@ -8343,7 +8273,7 @@ demand_load.emoji_codes = demand_load.make(function (resolve) {
 });
 
 (function () {
-var people_regex = /(?:[\u261d\u26f9\u270a-\u270d]|\ud83c[\udf85\udfc2-\udfc4\udfc7\udfca-\udfcc]|\ud83d[\udc42-\udc43\udc46-\udc50\udc66-\udc78\udc7c\udc81-\udc83\udc85-\udc87\udc8f\udc91\udcaa\udd74-\udd75\udd7a\udd90\udd95-\udd96\ude45-\ude47\ude4b-\ude4f\udea3\udeb4-\udeb6\udec0\udecc]|\ud83e[\udd0c\udd0f\udd18-\udd1f\udd26\udd30-\udd39\udd3c-\udd3e\udd77\uddb5-\uddb6\uddb8-\uddb9\uddbb\uddcd-\uddcf\uddd1-\udddd\udec3-\udec5\udef0-\udef6])/;
+const people_regex = /(?:[\u261d\u26f9\u270a-\u270d]|\ud83c[\udf85\udfc2-\udfc4\udfc7\udfca-\udfcc]|\ud83d[\udc42-\udc43\udc46-\udc50\udc66-\udc78\udc7c\udc81-\udc83\udc85-\udc87\udc8f\udc91\udcaa\udd74-\udd75\udd7a\udd90\udd95-\udd96\ude45-\ude47\ude4b-\ude4f\udea3\udeb4-\udeb6\udec0\udecc]|\ud83e[\udd0c\udd0f\udd18-\udd1f\udd26\udd30-\udd39\udd3c-\udd3e\udd77\uddb5-\uddb6\uddb8-\uddb9\uddbb\uddcd-\uddcf\uddd1-\udddd\udec3-\udec5\udef0-\udef6])/;
 
 function combine(sel, list, i, j) {
     while (i < j) {
@@ -8399,7 +8329,12 @@ function complete_list(v, sel, modifiers) {
 demand_load.emoji_completion = function (start) {
     return demand_load.emoji_codes().then(function (v) {
         var sel, i, ch, basic = v.lists.basic, m;
-        start = start.replace(/:$/, "");
+        if (start.startsWith(":")) {
+            start = start.substring(1);
+        }
+        if (start.endsWith(":")) {
+            start = start.substring(0, start.length - 1);
+        }
         if ((m = /^(-?[^-]+)-/.exec(start))
             && (ch = v.emoji[m[1]])
             && people_regex.test(ch)) {
@@ -8430,7 +8365,7 @@ demand_load.emoji_completion = function (start) {
 
 
 hotcrp.tooltip.add_builder("votereport", function (info) {
-    var pid = $(this).attr("data-pid") || siteinfo.paperid,
+    const pid = $(this).attr("data-pid") || siteinfo.paperid,
         tag = $(this).attr("data-tag");
     if (pid && tag)
         info.content = demand_load.make(function (resolve) {
@@ -8444,67 +8379,107 @@ hotcrp.tooltip.add_builder("votereport", function (info) {
 // suggestions and completion
 
 function completion_item(c) {
-    if (typeof c === "string")
+    if (typeof c === "string") {
         return {s: c};
-    else if ($.isArray(c))
+    } else if ($.isArray(c)) {
         return {s: c[0], d: c[1]};
-    else {
-        if (!("s" in c) && "sm1" in c) {
-            c = $.extend({s: c.sm1, ml: 1}, c);
-            delete c.sm1;
-        }
-        return c;
     }
+    if (!("s" in c) && "sm1" in c) {
+        c = $.extend({s: c.sm1, ml: 1}, c);
+        delete c.sm1;
+    }
+    return c;
 }
 
-function completion_split(elt) {
-    if (elt.selectionStart === elt.selectionEnd)
-        return [elt.value.substring(0, elt.selectionStart),
-                elt.value.substring(elt.selectionEnd)];
-    else
+function CompletionSpan(value, indexPos) {
+    this.value = value;         // Text including completion
+    this.indexPos = indexPos;   // Caret position (-1 if no match)
+    this.startPos = indexPos;   // Left position of completion span
+    this.endPos = indexPos;     // Right position of completion span
+    this.prefix = null;         // String prepended to each item (optional)
+    this.skipRe = null;         // Sticky regex matching data to skip on
+                                // successful completion (optional)
+    this.minLength = 0;         // Ignore completion items that don’t match
+                                // the first `minLength` characters of span
+    this.caseSensitive = null;  // If falsy (default), matches are case
+                                // insensitive. If truthy, then matches are
+                                // case sensitive; if "lower", then in addition
+                                // all items are assumed lowercased already
+    this.maxItems = null;       // Maximum number of completion items to show
+    this.postReplace = null;    // Function called after completion
+    this.smartPunctuation = false; // After completion, skip punctuation, and
+                                // if punctuation is typed, auto-remove
+                                // introduced space
+    this.limitReplacement = false; // After completion, replace only the edit
+                                // region and any subsequent characters that
+                                // match the chosen replacement
+}
+
+CompletionSpan.at = function (elt) {
+    const startPos = elt.selectionStart;
+    if (startPos !== elt.selectionEnd) {
+        return new CompletionSpan("", -1);
+    }
+    return new CompletionSpan(elt.value, startPos);
+};
+
+CompletionSpan.prototype.matchLeft = function (re) {
+    if (this.indexPos < 0) {
+        return false;
+    }
+    const m = re.exec(this.value.substring(Math.max(0, this.indexPos - 2000), this.indexPos));
+    if (!m) {
+        return false;
+    }
+    this.startPos = this.indexPos - (m[1] != null ? m[1].length : 0);
+    return true;
+};
+
+CompletionSpan.prototype.matchPrefixLeft = function (re) {
+    if (this.indexPos < 0) {
+        return false;
+    }
+    const m = re.exec(this.value.substring(Math.max(0, this.indexPos - 2000), this.indexPos));
+    if (!m) {
+        return false;
+    }
+    this.prefix = m[1];
+    this.startPos = this.indexPos - m[2].length;
+    return true;
+};
+
+CompletionSpan.prototype.matchRight = function (re) {
+    if (this.indexPos < 0) {
+        return false;
+    }
+    if (!re.sticky) {
+        throw new Error("!");
+    }
+    re.lastIndex = this.indexPos;
+    const m = re.exec(this.value);
+    if (!m) {
+        return false;
+    }
+    this.endPos = this.indexPos + (m[1] != null ? m[1].length : 0);
+    return true;
+};
+
+CompletionSpan.prototype.span = function () {
+    if (this.indexPos < 0) {
         return null;
-}
-
-function completion_search_prefix(cinfo, str) {
-    var i, s, case_sensitive = cinfo.case_sensitive, items = cinfo.items;
-    if (!case_sensitive || case_sensitive === "lower") {
-        str = str.toLowerCase();
     }
-    for (i = 0; i !== items.length; ++i) {
-        s = items[i].s;
-        if (!case_sensitive) {
-            s = s.toLowerCase();
-        }
-        if (s.startsWith(str)) {
-            return items[i];
-        }
-    }
-    return null;
-}
+    return this.value.substring(this.startPos, this.endPos);
+};
 
-function make_suggestions(precaret, postcaret, options) {
-    // The region around the caret is divided into three parts:
-    //     ... precaret ^ postcaret options.suffix ...
-    // * `precaret`, `postcaret`: Only highlight completion items that start
-    //   with `precaret + postcaret`. `precaret + postcaret` is collectively
-    //   called the match region.
-    // * `options.suffix`: After successful completion, caret skips over this.
-    //
-    // Other options:
-    // * `options.case_sensitive`: If falsy (default), then matches are case
-    //   insensitive. If truthy, then matches are case sensitive (match region
-    //   "A" will not match completion item "a"). If `"lower"`, then matches
-    //   are case insensitive, but all completion items are assumed to be
-    //   lower-case.
-    // * `options.ml`: Integer. Ignore completion items that don’t
-    //    match the first `ml` characters of the match region.
-    // * `options.prefix`: Show this before each item.
-    // * `options.max_items`: Maximum number of completion items to show.
-    // * `options.limit_replacement`: When completion succeeds, limit the
-    //   characters replaced in the input to the edit region and any following
-    //   characters that match.
-    //
-    // Completion items:
+CompletionSpan.prototype.spanMatches = function (elt) {
+    return elt.selectionStart === this.indexPos
+        && elt.selectionEnd === this.indexPos
+        && elt.value.length >= this.endPos
+        && elt.value.substring(this.startPos, this.endPos) === this.span();
+};
+
+CompletionSpan.prototype.filter = function (tlist) {
+    // `tlist` is a list of completion items:
     // * `item.s`: Completion string -- mandatory.
     // * `item.sh`: Completion item HTML (requires `item.r`).
     // * `item.d`: Description text.
@@ -8516,84 +8491,104 @@ function make_suggestions(precaret, postcaret, options) {
     // * A string `item` sets `item.s`.
     // * A two-element array `item` sets `item.s` and `item.d`, respectively.
     // * A `item.sm1` component sets `item.s = item.sm1` and `item.ml = 1`.
-    //
-    // Return value:
-    // * Extends `options`.
-    // * `items`: List of matching items.
-    // * `best`: Index of best item in `items`.
-    // * `lengths`: [precaret.length, postcaret.length, options.suffix.length].
-    // Set externally:
-    // * `startpos`: Precaret position.
-    // * `editlength`: Minimum postcaret length over this completion session.
 
-    options = options || {};
+    // Returns `null` or an object `{items, best, cspan}`, where `items` is
+    // the sublist of `tlist` that should be displayed, `best` is the index
+    // of the best item in `items`, and `cspan` is `this`. Also, set externally
+    // is `editlength`, the inimum postcaret length over this completion session
 
-    var case_sensitive = options.case_sensitive,
-        lregion = precaret + postcaret;
-    if (!case_sensitive || case_sensitive === "lower")
-        lregion = lregion.toLowerCase();
-    if (options.region_trimmer)
-        lregion = lregion.replace(options.region_trimmer, "");
-    if (options.ml > lregion.length) {
-        return function (/*tlist*/) {
-            return null;
-        };
+    if (this.indexPos < 0 || this.endPos - this.startPos < this.minLength) {
+        return null;
     }
-    var filter = options.ml ? lregion.substr(0, options.ml) : null,
-        lengths = [precaret.length, postcaret.length, (options.suffix || "").length];
-
-    return function (tlist) {
-        var res = [], best = null, i,
-            can_highlight = lregion.length >= (filter || "x").length,
-            titem, text, ltext, rl, last_text;
-
-        for (i = 0; i < tlist.length; ++i) {
-            titem = completion_item(tlist[i]);
-            text = titem.s;
-            ltext = case_sensitive ? text : text.toLowerCase();
+    const caseSensitive = this.caseSensitive;
+    let lregion = this.span();
+    if (!caseSensitive || caseSensitive === "lower") {
+        lregion = lregion.toLowerCase();
+    }
+    const filter = this.minLength ? lregion.substring(0, this.minLength) : null,
+        can_highlight = lregion.length >= (filter || "x").length,
+        res = [];
+    let best = null, last_text = null;
+    for (let titem of tlist) {
+        titem = completion_item(titem);
+        const text = titem.s,
+            ltext = caseSensitive ? text : text.toLowerCase(),
             rl = titem.ml || 0;
 
-            if ((filter === null || ltext.startsWith(filter))
-                && (rl === 0
-                    || (lregion.length >= rl
-                        && lregion.startsWith(ltext.substr(0, rl))))
-                && (last_text === null || last_text !== text)) {
-                if (can_highlight
-                    && ltext.startsWith(lregion)
-                    && (best === null
-                        || (titem.pri || 0) > (res[best].pri || 0)
-                        || ltext.length === lregion.length)) {
-                    best = res.length;
-                    if (titem.hl_length
-                        && lregion.length < titem.hl_length
-                        && titem.shorter_hl) {
-                        best = 0;
-                        while (best < res.length && res[best].s !== titem.shorter_hl)
-                            ++best;
+        if ((filter === null || ltext.startsWith(filter))
+            && (rl === 0
+                || (lregion.length >= rl
+                    && lregion.startsWith(ltext.substr(0, rl))))
+            && (last_text === null || last_text !== text)) {
+            if (can_highlight
+                && ltext.startsWith(lregion)
+                && (best === null
+                    || (titem.pri || 0) > (res[best].pri || 0)
+                    || ltext.length === lregion.length)) {
+                best = res.length;
+                if (titem.hl_length
+                    && lregion.length < titem.hl_length
+                    && titem.shorter_hl) {
+                    best = 0;
+                    while (best < res.length && res[best].s !== titem.shorter_hl) {
+                        ++best;
                     }
                 }
-                res.push(titem);
-                last_text = text;
-                if (res.length === options.max_items)
-                    break;
+            }
+            res.push(titem);
+            last_text = text;
+            if (res.length === this.maxItems) {
+                break;
             }
         }
+    }
+    if (res.length === 0) {
+        return null;
+    }
+    return {items: res, best: best, cspan: this};
+};
 
-        return res.length ? $.extend({items: res, lengths: lengths, best: best}, options) : null;
-    };
-}
+CompletionSpan.prototype.filterFrom = function (promise) {
+    if (this.indexPos < 0) {
+        return null;
+    }
+    const self = this;
+    return promise.then(function (tlist) { return self.filter(tlist); });
+};
+
+CompletionSpan.prototype.searchLeft = function (tlist) {
+    if (this.indexPos < 0) {
+        return null;
+    }
+    const caseSensitive = this.caseSensitive;
+    let lregion = this.value.substring(this.startPos, this.indexPos);
+    if (!caseSensitive || caseSensitive === "lower") {
+        lregion = lregion.toLowerCase();
+    }
+    for (let titem of tlist) {
+        titem = completion_item(titem);
+        const text = titem.s,
+            ltext = caseSensitive ? text : text.toLowerCase();
+        if (ltext.startsWith(lregion)) {
+            return titem;
+        }
+    }
+    return null;
+};
 
 hotcrp.suggest = (function () {
-var builders = {}, punctre;
+const builders = {};
+let punctre;
 try {
-    punctre = new RegExp("^(?!@)[\\p{Po}\\p{Pd}\\p{Pe}\\p{Pf}]$", "u");
+    punctre = new RegExp("(?!@)[\\p{Po}\\p{Pd}\\p{Pe}\\p{Pf}]+", "uy");
 } catch (err) {
-    punctre = /^[-‐‑‒–—!"#%&'*,./:;?\\¡§¶·¿¡)\]}»›’”]$/;
+    punctre = /[-‐‑‒–—!"#%&'*,./:;?\\§¶·¿¡)\]}»›’”]+/y;
 }
 
 function suggest() {
-    var elt = this, suggdata,
-        hintdiv, hintinfo, blurring = false, hiding = false, will_display = false,
+    const elt = this;
+    let suggdata, hintdiv, hintinfo,
+        blurring = false, hiding = false, will_display = false,
         wasnav = 0, spacestate = -1, wasmouse = null, autocomplete = null;
 
     function kill(success) {
@@ -8610,7 +8605,7 @@ function suggest() {
     }
 
     function render_item(titem, prepend) {
-        let node = document.createElement("div");
+        const node = document.createElement("div");
         node.className = titem.no_space ? "suggestion s9nsp" : "suggestion";
         if (titem.r) {
             node.setAttribute("data-replacement", titem.r);
@@ -8643,7 +8638,7 @@ function suggest() {
         }
         node.appendChild($e("span", "s9t", s));
         if (titem.d || titem.dh) {
-            var s9d = document.createElement("span");
+            const s9d = document.createElement("span");
             s9d.className = "s9d";
             if (titem.dh) {
                 s9d.innerHTML = titem.dh;
@@ -8656,14 +8651,17 @@ function suggest() {
     }
 
     function finish_display(cinfo) {
-        if (!cinfo || !cinfo.items.length) {
+        if (!cinfo
+            || !cinfo.items.length
+            || !cinfo.cspan.spanMatches(elt)) {
             kill();
             return;
         }
-        var caretpos = elt.selectionStart,
-            precaretpos = caretpos - cinfo.lengths[0];
-        if (hiding && hiding === elt.value.substring(precaretpos, caretpos))
+        const cspan = cinfo.cspan;
+        if (hiding
+            && hiding === cspan.value.substring(cspan.startPos, cspan.indexPos)) {
             return;
+        }
 
         hiding = false;
         if (!hintdiv) {
@@ -8674,35 +8672,42 @@ function suggest() {
             wasmouse = null;
         }
 
-        var i, clist = cinfo.items, same_list = false;
-        cinfo.startpos = precaretpos;
-        if (hintinfo && hintinfo.items && hintinfo.items.length === clist.length) {
-            for (same_list = true, i = 0; i !== clist.length; ++i) {
+        const clist = cinfo.items;
+        let same_list = false;
+        if (hintinfo
+            && hintinfo.items
+            && hintinfo.items.length === clist.length) {
+            same_list = true;
+            for (let i = 0; i !== clist.length; ++i) {
                 if (hintinfo.items[i] !== clist[i]) {
                     same_list = false;
                     break;
                 }
             }
         }
-        cinfo.editlength = cinfo.lengths[1];
-        if (hintinfo && hintinfo.startpos === cinfo.startpos) {
+        cinfo.editlength = cspan.endPos - cspan.indexPos;
+        if (hintinfo && hintinfo.cspan.startPos === cinfo.startPos) {
             cinfo.editlength = Math.min(cinfo.editlength, hintinfo.editlength);
         }
         hintinfo = cinfo;
 
-        var div;
+        let div;
         if (!same_list) {
-            var ml = [10, 30, 60, 90, 120];
-            for (i = 0; i !== ml.length && clist.length > ml[i]; ++i)
-                /* nada */;
-            if (cinfo.min_columns && cinfo.min_columns > i + 1)
+            const ml = [10, 30, 60, 90, 120];
+            let i = 0;
+            while (i !== ml.length && clist.length > ml[i]) {
+                ++i;
+            }
+            if (cinfo.min_columns && cinfo.min_columns > i + 1) {
                 i = cinfo.min_columns - 1;
-            if (clist.length < i + 1)
+            }
+            if (clist.length < i + 1) {
                 i = clist.length - 1;
+            }
             div = document.createElement("div");
             div.className = "suggesttable suggesttable" + (i + 1);
-            for (i = 0; i !== clist.length; ++i) {
-                div.appendChild(render_item(clist[i], cinfo.prefix));
+            for (const cliste of clist) {
+                div.appendChild(render_item(cliste, cspan.prefix));
             }
             hintdiv.html(div);
         } else {
@@ -8715,11 +8720,11 @@ function suggest() {
 
         let $elt = jQuery(elt),
             shadow = textarea_shadow($elt, elt.tagName === "INPUT" ? 2000 : 0),
-            positionpos = precaretpos;
-        if (cinfo.prefix
-            && positionpos >= cinfo.prefix.length
-            && elt.value.substring(positionpos - cinfo.prefix.length, positionpos) === cinfo.prefix) {
-            positionpos -= cinfo.prefix.length;
+            positionpos = cspan.startPos;
+        if (cspan.prefix
+            && positionpos >= cspan.prefix.length
+            && elt.value.substring(positionpos - cspan.prefix.length, positionpos) === cspan.prefix) {
+            positionpos -= cspan.prefix.length;
         }
         const wj = $e("span", null, "⁠");
         shadow[0].replaceChildren(elt.value.substring(0, positionpos), wj, elt.value.substring(positionpos));
@@ -8734,17 +8739,18 @@ function suggest() {
     }
 
     function display() {
-        var i = -1;
+        let i = -1;
         function next(cinfo) {
             ++i;
-            if (cinfo || i == suggdata.promises.length)
+            if (cinfo || i == suggdata.promises.length) {
                 finish_display(cinfo);
-            else {
-                var result = suggdata.promises[i](elt, hintinfo);
-                if (result && $.isFunction(result.then))
+            } else {
+                const result = suggdata.promises[i](elt, hintinfo);
+                if (result && $.isFunction(result.then)) {
                     result.then(next);
-                else
+                } else {
                     next(result);
+                }
             }
         }
         next(null);
@@ -8759,58 +8765,68 @@ function suggest() {
     }
 
     function do_complete(complete_elt) {
-        var repl;
-        if (complete_elt.hasAttribute("data-replacement"))
+        if (!hintinfo.cspan.spanMatches(elt)) {
+            kill(true);
+            return;
+        }
+
+        let repl;
+        if (complete_elt.hasAttribute("data-replacement")) {
             repl = complete_elt.getAttribute("data-replacement");
-        else if (complete_elt.firstChild.nodeType === Node.TEXT_NODE)
+        } else if (complete_elt.firstChild.nodeType === Node.TEXT_NODE) {
             repl = complete_elt.textContent;
-        else {
-            var n = complete_elt.firstChild;
+        } else {
+            let n = complete_elt.firstChild;
             while (n.className !== "s9t") {
                 n = n.nextSibling;
             }
             repl = n.textContent;
         }
 
-        var val = elt.value,
-            startPos = hintinfo.startpos,
-            endPos = startPos + hintinfo.lengths[0] + hintinfo.lengths[1],
-            sfxLen = hintinfo.lengths[2];
-        if (sfxLen) {
-            repl += val.substring(endPos, endPos + sfxLen);
-            endPos += sfxLen;
+        const cspan = hintinfo.cspan;
+        let val = elt.value, startPos = cspan.startPos, endPos = cspan.endPos;
+        const skipRe = cspan.skipRe || (cspan.smartPunctuation && punctre);
+        if (skipRe) {
+            skipRe.lastIndex = endPos;
+            const m = skipRe.exec(val);
+            if (m) {
+                endPos += m[0].length;
+                repl += val.substring(endPos - m[0].length, endPos);
+            }
         }
-        if (hintinfo.limit_replacement) {
+        if (cspan.limitReplacement) {
             endPos -= hintinfo.editlength;
-            while (endPos - startPos < repl.length && val.charCodeAt(endPos) === repl.charCodeAt(endPos - startPos)) {
+            while (endPos - startPos < repl.length
+                   && val.charCodeAt(endPos) === repl.charCodeAt(endPos - startPos)) {
                 ++endPos;
             }
         }
-        var outPos = startPos + repl.length;
+        let outPos = startPos + repl.length;
         if (hasClass(complete_elt, "s9nsp")) {
             spacestate = -1;
         } else {
             ++outPos;
             repl += " ";
-            spacestate = hintinfo.smart_punctuation ? outPos : -1;
+            spacestate = cspan.smartPunctuation ? outPos : -1;
         }
         if (startPos < 0 || endPos < 0 || startPos > endPos || endPos > val.length) {
-            let x = Object.assign({}, hintinfo);
+            const x = Object.assign({}, hintinfo);
             delete x.items;
             log_jserror(JSON.stringify({value:val,hint:x,repl:repl,startPos:startPos,endPos:endPos}));
         }
         elt.setRangeText(repl, startPos, endPos, "end");
-        if (hintinfo.postreplace)
-            hintinfo.postreplace(elt, repl, startPos);
+        if (hintinfo.postReplace) {
+            hintinfo.postReplace(elt, repl, startPos);
+        }
         $(elt).trigger("input");
 
         kill(true);
     }
 
     function move_active(k) {
-        var $sug = hintdiv.self().find(".suggestion"),
-            $active = hintdiv.self().find(".s9y"),
-            pos = null;
+        const $sug = hintdiv.self().find(".suggestion"),
+            $active = hintdiv.self().find(".s9y");
+        let pos = null;
         if (!$active.length) {
             if (k === "ArrowUp")
                 pos = -1;
@@ -8819,17 +8835,18 @@ function suggest() {
             else
                 return false;
         } else if (k === "ArrowUp" || k === "ArrowDown") {
-            for (pos = 0; pos !== $sug.length - 1 && $sug[pos] !== $active[0]; ++pos) {
+            pos = 0;
+            while (pos !== $sug.length - 1 && $sug[pos] !== $active[0]) {
+                ++pos;
             }
             pos += k === "ArrowDown" ? 1 : -1;
         } else if ((k === "ArrowLeft" && wasnav > 0)
                    || (k === "ArrowRight" && (wasnav > 0 || elt.selectionEnd === elt.value.length))) {
-            var $activeg = $active.geometry(),
-                nextadx = Infinity, nextady = Infinity,
-                isleft = k === "ArrowLeft",
-                side = (isleft ? "left" : "right");
-            for (var i = 0; i != $sug.length; ++i) {
-                var $thisg = $($sug[i]).geometry(),
+            const $activeg = $active.geometry(),
+                isleft = k === "ArrowLeft", side = isleft ? "left" : "right";
+            let nextadx = Infinity, nextady = Infinity;
+            for (let i = 0; i != $sug.length; ++i) {
+                const $thisg = $($sug[i]).geometry(),
                     dx = $activeg[side] - $thisg[side],
                     adx = Math.abs(dx),
                     ady = Math.abs(($activeg.top + $activeg.bottom) - ($thisg.top + $thisg.bottom));
@@ -8845,25 +8862,25 @@ function suggest() {
                 return true;
             }
         }
-        if (pos !== null) {
-            pos = (pos + $sug.length) % $sug.length;
-            if ($sug[pos] !== $active[0]) {
-                $active.removeClass("s9y");
-                addClass($sug[pos], "s9y");
-            }
-            wasnav = 2;
-            return true;
-        } else {
+        if (pos === null) {
             return false;
         }
+        pos = (pos + $sug.length) % $sug.length;
+        if ($sug[pos] !== $active[0]) {
+            $active.removeClass("s9y");
+            addClass($sug[pos], "s9y");
+        }
+        wasnav = 2;
+        return true;
     }
 
     function kp(evt) {
         var k = event_key(evt), m = event_key.modcode(evt),
             pspacestate = spacestate;
         if (k === "Escape" && !m) {
-            if (hintinfo) {
-                hiding = this.value.substring(hintinfo.startpos, hintinfo.startpos + hintinfo.lengths[0]);
+            if (hintinfo && hintinfo.cspan.spanMatches(this)) {
+                const cspan = hintinfo.cspan;
+                hiding = this.value.substring(cspan.startPos, cspan.indexPos);
                 kill();
                 evt.preventDefault();
                 handle_ui.stopImmediatePropagation(evt);
@@ -8881,12 +8898,14 @@ function suggest() {
                    && event_key.printable(evt)
                    && elt.selectionStart === elt.selectionEnd
                    && elt.selectionStart === pspacestate
-                   && elt.value.charCodeAt(pspacestate - 1) === 32
-                   && punctre.test(k)) {
-            elt.setRangeText(k, pspacestate - 1, pspacestate, "end");
-            evt.preventDefault();
-            handle_ui.stopPropagation(evt);
-            display_soon();
+                   && elt.value.charCodeAt(pspacestate - 1) === 32) {
+            punctre.lastIndex = 0;
+            if (punctre.test(k)) {
+                elt.setRangeText(k, pspacestate - 1, pspacestate, "end");
+                evt.preventDefault();
+                handle_ui.stopPropagation(evt);
+                display_soon();
+            }
         }
         wasnav = Math.max(wasnav - 1, 0);
         wasmouse = null;
@@ -8941,51 +8960,59 @@ suggest.add_builder = function (name, f) {
     builders[name] = f;
 };
 
+suggest.CompletionSpan = CompletionSpan;
+
 return suggest;
 })();
 
 hotcrp.suggest.add_builder("tags", function (elt) {
-    var x = completion_split(elt), m, n;
-    if (x && (m = x[0].match(/(?:^|\s)(#?)([^#\s]*)$/))) {
-        n = x[1].match(/^([^#\s]*)((?:#[-+]?(?:\d+\.?|\.\d)\d*)?)/);
-        return demand_load.tags().then(make_suggestions(m[2], n[1], {suffix: n[2]}));
+    const cs = hotcrp.suggest.CompletionSpan.at(elt);
+    if (cs.matchLeft(/(?:^|\s)#?([^#\s]*)$/)) {
+        cs.matchRight(/([^#\s]*)/y);
+        cs.skipRe = /#[-+]?(?:\d+\.?|\.\d)\d*/y;
+        return cs.filterFrom(demand_load.tags());
     }
 });
 
 hotcrp.suggest.add_builder("editable-tags", function (elt) {
-    var x = completion_split(elt), m, n;
-    if (x && (m = x[0].match(/(?:^|\s)(#?)([^#\s]*)$/))) {
-        n = x[1].match(/^([^#\s]*)((?:#[-+]?(?:\d+\.?|\.\d)\d*)?)/);
-        return demand_load.editable_tags().then(make_suggestions(m[2], n[1], {suffix: n[2]}));
+    const cs = hotcrp.suggest.CompletionSpan.at(elt);
+    if (cs.matchLeft(/(?:^|\s)#?([^#\s]*)$/)) {
+        cs.matchRight(/([^#\s]*)/y);
+        cs.skipRe = /#[-+]?(?:\d+\.?|\.\d)\d*/y;
+        return cs.filterFrom(demand_load.editable_tags());
     }
 });
 
 hotcrp.suggest.add_builder("sitewide-editable-tags", function (elt) {
-    var x = completion_split(elt), m, n;
-    if (x && (m = x[0].match(/(?:^|\s)(#?)([^#\s]*)$/))) {
-        n = x[1].match(/^([^#\s]*)((?:#[-+]?(?:\d+\.?|\.\d)\d*)?)/);
-        return demand_load.sitewide_editable_tags().then(make_suggestions(m[2], n[1], {suffix: n[2]}));
+    const cs = hotcrp.suggest.CompletionSpan.at(elt);
+    if (cs.matchLeft(/(?:^|\s)#?([^#\s]*)$/)) {
+        cs.matchRight(/([^#\s]*)/y);
+        cs.skipRe = /#[-+]?(?:\d+\.?|\.\d)\d*/y;
+        return cs.filterFrom(demand_load.sitewide_editable_tags());
     }
 });
 
 hotcrp.suggest.add_builder("papersearch", function (elt) {
-    var x = completion_split(elt), m, n;
-    if (x && (m = x[0].match(/.*?(?:^|[^\w:])((?:tag|r?order):\s*#?|#|(?:show|hide):\s*(?:#|tag:|tagval:|tagvalue:))([^#\s()]*)$/))) {
-        n = x[1].match(/^([^#\s()]*)/);
-        return demand_load.tags().then(make_suggestions(m[2], n[1], {prefix: m[1]}));
-    } else if (x && (m = x[0].match(/.*?\b((?:[A-Za-z0-9]{1,10}):(?:[^"\s()]*|"[^"]*))$/))) {
-        n = x[1].match(/^([^\s()]*)/);
-        return demand_load.search_completion().then(make_suggestions(m[1], n[1], {ml: m[1].indexOf(":") + 1}));
+    const cs = hotcrp.suggest.CompletionSpan.at(elt);
+    if (cs.matchPrefixLeft(/(?:^|[^\w:])((?:tag|r?order):\s*#?|#|(?:show|hide):\s*(?:#|tag:|tagval:|tagvalue:))([^#\s()]*)$/)) {
+        cs.matchRight(/([^#\s()]*)/y);
+        cs.skipRe = /#[-+]?(?:\d+\.?|\.\d)\d*/y;
+        return cs.filterFrom(demand_load.tags());
+    } else if (cs.matchLeft(/\b((?:[A-Za-z0-9]{1,10}):(?:[^"\s()]*|"[^"]*))$/)) {
+        cs.matchRight(/([^\s()]*)/y);
+        cs.minLength = cs.span().indexOf(":") + 1;
+        return cs.filterFrom(demand_load.search_completion());
     }
 });
 
 hotcrp.suggest.add_builder("pc-tags", function (elt) {
-    var x = completion_split(elt), m, n;
-    if (x && (m = x[0].match(/(?:^|\s)(#?)([^#\s]*)$/))) {
-        n = x[1].match(/^(\S*)/);
-        return demand_load.pc().then(function (pc) {
-            return make_suggestions(m[2], n[1])(pc.tags || []);
-        });
+    const cs = hotcrp.suggest.CompletionSpan.at(elt);
+    if (cs.matchLeft(/(?:^|\s)#?([^#\s]*)$/)) {
+        cs.matchRight(/([^#\s]*)/y);
+        cs.skipRe = /#[-+]?(?:\d+\.?|\.\d)\d*/y;
+        return cs.filterFrom(demand_load.pc().then(function (pc) {
+            return pc.tags || [];
+        }));
     }
 });
 
@@ -8999,38 +9026,46 @@ function suggest_emoji_postreplace(elt, repl, startPos) {
 
 hotcrp.suggest.add_builder("suggest-emoji", function (elt) {
     /* eslint-disable no-misleading-character-class */
-    var x = completion_split(elt), m;
-    if (x && (m = x[0].match(/(?:^|[\s(\u20e3-\u23ff\u2600-\u27ff\ufe0f\udc00-\udfff]):((?:|\+|\+?[-_0-9a-zA-Z]+):?)$/))
-        && /^(?:$|[\s)\u20e3-\u23ff\u2600-\u27ff\ufe0f\ud83c-\ud83f])/.test(x[1])) {
-        return demand_load.emoji_completion(m[1].toLowerCase()).then(make_suggestions(":" + m[1], "", {case_sensitive: "lower", max_items: 8, postreplace: suggest_emoji_postreplace}));
+    const cs = hotcrp.suggest.CompletionSpan.at(elt);
+    if (cs.matchLeft(/(?:^|[\s(\u20e3-\u23ff\u2600-\u27ff\ufe0f\udc00-\udfff])(:(?:|\+|\+?[-_0-9a-zA-Z]+):?)$/)
+        && cs.matchRight(/(?:$|[\s)\u20e3-\u23ff\u2600-\u27ff\ufe0f\ud83c-\ud83f])/y)) {
+        cs.caseSensitive = "lower";
+        cs.maxItems = 8;
+        cs.postReplace = suggest_emoji_postreplace;
+        return cs.filterFrom(demand_load.emoji_completion(cs.span().toLowerCase()));
     }
     /* eslint-enable no-misleading-character-class */
 });
 
 hotcrp.suggest.add_builder("mentions", function (elt, hintinfo) {
-    var x = completion_split(elt), precaret, m, prom;
-    if (!x) {
+    const cs = hotcrp.suggest.CompletionSpan.at(elt);
+    if (cs.span() === null) {
         return null;
     }
     if (hintinfo
-        && hintinfo.startpos < x[0].length - 1
-        && x[0].charCodeAt(hintinfo.startpos - 1) === 0x40
-        && completion_search_prefix(hintinfo, x[0].substring(hintinfo.startpos))) {
-        precaret = x[0].substring(hintinfo.startpos);
-    } else if ((m = x[0].match(/(?:^|[-+,:;\s–—([{/])@(|\p{L}(?:[\p{L}\p{M}\p{N}]|[-.](?=\p{L}))*)$/u))) {
-        precaret = m[1];
-    } else {
+        && hintinfo.cspan.startPos < cs.indexPos - 1
+        && cs.value.charCodeAt(hintinfo.cspan.startPos - 1) === 0x40) {
+        cs.startPos = hintinfo.cspan.startPos;
+        if (!cs.searchLeft(hintinfo.items)) {
+            cs.startPos = cs.indexPos;
+        }
+    }
+    if (cs.startPos === cs.indexPos
+        && !cs.matchLeft(/(?:^|[-+,:;\s–—([{/])@(|\p{L}(?:[\p{L}\p{M}\p{N}]|[-.](?=\p{L}))*)$/u)) {
         return null;
     }
-    m = x[1].match(/^(?:[\p{L}\p{M}\p{N}]|[-.](?=\p{L}))*/u);
-    prom = demand_load.mentions();
+    cs.matchRight(/(?:[\p{L}\p{M}\p{N}]|[-.](?=\p{L}))*/uy);
+    cs.prefix = "@";
+    cs.minLength = Math.min(2, cs.indexPos - cs.startPos);
+    cs.smartPunctuation = cs.limitReplacement = true;
+    let prom = demand_load.mentions();
     if (elt.form.elements.visibility
         && elt.form.elements.visibility.value !== "au") {
         prom = prom.then(function (l) {
             return l.filter(function (x) { return !x.au; });
         });
     }
-    return prom.then(make_suggestions(precaret, m[0], {prefix: "@", ml: Math.min(2, precaret.length), smart_punctuation: true, limit_replacement: true}));
+    return cs.filterFrom(prom);
 });
 
 
@@ -9654,30 +9689,31 @@ function tag_simplify(tag) {
 }
 
 function tagvalue_parse(s) {
-    if (s.match(/^\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)\s*$/))
+    if (s.match(/^\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)\s*$/)) {
         return +s;
+    }
     s = s.replace(/^\s+|\s+$/, "").toLowerCase();
-    if (s === "y" || s === "yes" || s === "t" || s === "true" || s === "✓")
+    if (s === "y" || s === "yes" || s === "t" || s === "true" || s === "✓") {
         return 0;
-    else if (s === "n" || s === "no" || s === "" || s === "f" || s === "false" || s === "na" || s === "n/a" || s === "clear")
+    } else if (s === "n" || s === "no" || s === "" || s === "f" || s === "false" || s === "na" || s === "n/a" || s === "clear") {
         return false;
-    else
-        return null;
+    }
+    return null;
 }
 
 function tagvalue_unparse(tv) {
-    if (tv === false || tv == null)
+    if (tv === false || tv == null) {
         return "";
-    else
-        return sprintf("%.2f", tv).replace(/\.0+$|0+$/, "");
+    }
+    return sprintf("%.2f", tv).replace(/\.0+$|0+$/, "");
 }
 
 function row_tagvalue(row, tag) {
-    var tags = row.getAttribute("data-tags"), m;
-    if (tags && (m = new RegExp("(?:^| )" + regexp_quote(tag) + "#(\\S+)", "i").exec(tags)))
+    let tags = row.getAttribute("data-tags"), m;
+    if (tags && (m = new RegExp("(?:^| )" + regexp_quote(tag) + "#(\\S+)", "i").exec(tags))) {
         return tagvalue_parse(m[1]);
-    else
-        return false;
+    }
+    return false;
 }
 
 
@@ -10382,8 +10418,8 @@ function DraggableTable(srctr, dragtag) {
     this.srcindex = null;
     this.dragindex = null;
 
-    var tr, tranal = null, groupindex = -1;
-    for (tr = this.tablelist.tBodies[0].firstChild; tr; tr = tr.nextSibling) {
+    let tranal = null, groupindex = -1;
+    for (let tr = this.tablelist.tBodies[0].firstChild; tr; tr = tr.nextSibling) {
         if (tr.nodeName === "TR") {
             if (hasClass(tr, "plx")) {
                 tranal.back = tr;
@@ -10412,9 +10448,8 @@ DraggableTable.prototype.group_back_index = function (i) {
 DraggableTable.prototype.content = function () {
     if (this.srcindex !== null) {
         return this.rs[this.srcindex].legend();
-    } else {
-        return "None";
     }
+    return "None";
 };
 
 function Tagval_DraggableTable(srctr, dragtag) {
@@ -10423,12 +10458,12 @@ function Tagval_DraggableTable(srctr, dragtag) {
     this.gapf = function () { return 1; };
     // annotated groups are assumed to be gapless
     if (this.grouprs.length > 0) {
-        var sd = 0, nd = 0, s2d = 0, lv = null, d, i;
-        for (i = 0; i < this.rs.length; ++i) {
+        let sd = 0, nd = 0, s2d = 0, lv = null;
+        for (let i = 0; i < this.rs.length; ++i) {
             if (this.rs[i].id && this.rs[i].tagval !== false) {
                 if (lv !== null) {
                     ++nd;
-                    d = this.rs[i].tagval - lv;
+                    const d = this.rs[i].tagval - lv;
                     sd += d;
                     s2d += d * d;
                 }
@@ -10442,10 +10477,11 @@ function Tagval_DraggableTable(srctr, dragtag) {
 }
 Object.setPrototypeOf(Tagval_DraggableTable.prototype, DraggableTable.prototype);
 Tagval_DraggableTable.prototype.content = function () {
-    var frag = document.createDocumentFragment(), newval,
+    const frag = document.createDocumentFragment(),
         unchanged = this.srcindex === this.dragindex,
         srcra = this.rs[this.srcindex];
     frag.append(srcra.legend());
+    let newval;
     if (unchanged) {
         newval = srcra.tagval;
     } else {
@@ -10461,9 +10497,9 @@ Tagval_DraggableTable.prototype.content = function () {
     return frag;
 };
 Tagval_DraggableTable.prototype.compute = function () {
-    var i, j, len = this.rs.length, d, tv,
-        si = this.srcindex, di = this.dragindex,
+    const len = this.rs.length, si = this.srcindex, di = this.dragindex,
         sigroup = this.rs[si].isgroup, nsi = this.group_back_index(si) - si + 1;
+    let i, j, d, tv;
     // initialize to unchanged, reset gap
     for (i = 0; i !== len; ++i) {
         this.rs[i].newtagval = this.rs[i].tagval;
@@ -10555,13 +10591,12 @@ Tagval_DraggableTable.prototype.compute = function () {
     }
 };
 Tagval_DraggableTable.prototype.commit = function () {
-    var saves = [], annosaves = [], i, e, row, nv,
-        srcra = this.rs[this.srcindex];
+    const saves = [], annosaves = [], srcra = this.rs[this.srcindex];
     this.compute();
-    for (i = 0; i !== this.rs.length; ++i) {
-        row = this.rs[i];
+    for (let i = 0; i !== this.rs.length; ++i) {
+        const row = this.rs[i];
         if (row.newtagval !== row.tagval) {
-            nv = tagvalue_unparse(row.newtagval);
+            const nv = tagvalue_unparse(row.newtagval);
             if (row.id) {
                 saves.push("".concat(row.id, " ", this.dragtag, "#", nv === "" ? "clear" : nv));
             } else if (row.annoid) {
@@ -10570,7 +10605,7 @@ Tagval_DraggableTable.prototype.commit = function () {
         }
     }
     if (saves.length) {
-        e = srcra.front.querySelector("input[name='tag:".concat(this.dragtag, " ", srcra.id, "']"));
+        const e = srcra.front.querySelector("input[name='tag:".concat(this.dragtag, " ", srcra.id, "']"));
         $.post(hoturl("=api/assigntags", {forceShow: 1}),
             {tagassignment: saves.join(","), search: tablelist_search(this.tablelist)},
             make_tag_save_callback(e));
@@ -10598,12 +10633,12 @@ Assign_DraggableTable.prototype.drag_groupindex = function () {
     }
 };
 Assign_DraggableTable.prototype.content = function () {
-    var frag = document.createDocumentFragment(),
+    const frag = document.createDocumentFragment(),
         srcra = this.rs[this.srcindex],
         oldidx = srcra.groupindex,
-        newidx = this.drag_groupindex(),
-        legend;
+        newidx = this.drag_groupindex();
     frag.append(srcra.legend());
+    let legend;
     if (newidx < this.assigninfo.length) {
         legend = this.groupinfo[newidx].legend;
     } else {
@@ -10618,14 +10653,14 @@ Assign_DraggableTable.prototype.content = function () {
     return frag;
 };
 Assign_DraggableTable.prototype.commit = function () {
-    var as = [], i,
+    const as = [],
         srcra = this.rs[this.srcindex],
         oldidx = srcra.groupindex,
         newidx = this.drag_groupindex();
     function doassignlist(as, assignlist, id, ondrag) {
-        var i, len = (assignlist || []).length, x;
-        for (i = 0; i !== len; ++i) {
-            x = assignlist[i];
+        const len = (assignlist || []).length;
+        for (let i = 0; i !== len; ++i) {
+            let x = assignlist[i];
             if (x.ondrag === ondrag) {
                 x = Object.assign({pid: id}, x);
                 delete x.ondrag;
@@ -10634,7 +10669,7 @@ Assign_DraggableTable.prototype.commit = function () {
         }
     }
     if (oldidx !== newidx) {
-        for (i = 0; i !== this.assigninfo.length; ++i) {
+        for (let i = 0; i !== this.assigninfo.length; ++i) {
             i !== newidx && doassignlist(as, this.assigninfo[i], srcra.id, "leave");
         }
         doassignlist(as, this.assigninfo[newidx], srcra.id, "enter");
@@ -13971,6 +14006,47 @@ handle_ui.on("foldtoggle.js-unfold-pcselector", function (evt) {
     }
 });
 
+
+handle_ui.on("js-assign-potential-conflict", function () {
+    const self = this, pid = +this.getAttribute("data-pid"), ass = {
+        type: "conflict", pid: pid, uid: +this.getAttribute("data-uid"),
+        conflict: this.getAttribute("data-conflict-type") || "pinned conflicted"
+    };
+    function success(rv) {
+        if (!rv || !rv.ok) {
+            return;
+        }
+        const div = self.closest(".msg-inform"), f = self.form,
+            is_none = /unconflicted|none/.test(ass.conflict);
+        if (!div) {
+            return;
+        }
+        if (!is_none) {
+            for (const e of f.querySelectorAll(".assignment-summary")) {
+                e.hidden = true;
+            }
+            for (const e of f.querySelectorAll(".if-assign-potential-conflict")) {
+                e.hidden = false;
+            }
+            const submit = f.elements.submit, reassign = f.elements.reassign;
+            if (submit) {
+                submit.disabled = true;
+                submit.hidden = true;
+            }
+            if (reassign) {
+                reassign.hidden = false;
+            }
+        }
+        div.replaceChildren($e("div", "is-diagnostic is-success",
+            is_none ? "Conflict ignored" : "Conflict confirmed"));
+    }
+    $ajax.condition(function () {
+        $.ajax(hoturl("=api/assign", {p: pid}), {
+            method: "POST", data: {assignments: JSON.stringify([ass])},
+            success: success, trackOutstanding: true
+        });
+    });
+});
 
 handle_ui.on("js-assign-review", function (evt) {
     var form = this.form, m;

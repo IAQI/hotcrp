@@ -118,7 +118,7 @@ class Comment_API {
         $suser = $this->user;
         if (($token = $qreq->review_token)
             && ($token = decode_token($token, "V"))
-            && in_array($token, $this->user->review_tokens())
+            && in_array($token, $this->user->review_tokens(), true)
             && ($rrow = $this->prow->review_by_token($token))) {
             $suser = $this->conf->user_by_id($rrow->contactId);
         }
@@ -234,8 +234,7 @@ class Comment_API {
             $crow = $rcrow;
         } else if ($c === "new" || $c === "response") {
             $crow = null;
-        } else if (is_int($c) || ctype_digit($c)) {
-            $cn = is_int($c) ? $c : intval($c);
+        } else if (($cn = stoi($c)) !== null) {
             $crow = $this->find_comment("commentId={$cn}");
         } else if ($c === "" && $qreq->is_post()) {
             $c = "new";

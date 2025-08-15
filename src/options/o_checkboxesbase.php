@@ -108,7 +108,7 @@ abstract class CheckboxesBase_PaperOption extends PaperOption {
         if ($v !== "" && $v !== "0" && ctype_digit($v)) {
             $tid = intval($v);
             if ($this->topic_set()->name($tid) !== null
-                && !in_array($tid, $vs)) {
+                && !in_array($tid, $vs, true)) {
                 $vs[] = $tid;
             }
         }
@@ -117,7 +117,7 @@ abstract class CheckboxesBase_PaperOption extends PaperOption {
 
     function parse_json(PaperInfo $prow, $j) {
         $bad = false;
-        if (is_object($j) || is_associative_array($j)) {
+        if (is_object($j) || (is_array($j) && !array_is_list($j))) {
             $j = array_keys(array_filter((array) $j, function ($x) use (&$bad) {
                 if ($x !== null && $x !== false && $x !== true) {
                     $bad = true;
@@ -173,7 +173,7 @@ abstract class CheckboxesBase_PaperOption extends PaperOption {
             $basev = $prow->base_option($this);
             foreach ($this->topic_set() as $tid => $tname) {
                 if ($fcs->test("{$this->formid}:{$tid}") === FieldChangeSet::UNCHANGED) {
-                    $qreq["{$this->formid}:{$tid}"] = in_array($tid, $basev->value_list()) ? "1" : "";
+                    $qreq["{$this->formid}:{$tid}"] = in_array($tid, $basev->value_list(), true) ? "1" : "";
                 }
             }
         }
@@ -204,8 +204,8 @@ abstract class CheckboxesBase_PaperOption extends PaperOption {
             if (($isgroup = $tg->nontrivial())) {
                 echo '<li class="ctelt cteltg"><div class="ctelti">';
                 if ($tg->has_group_topic()) {
-                    $arg["data-default-checked"] = in_array($tg->tid, $ov->value_list());
-                    $checked = in_array($tg->tid, $reqov->value_list());
+                    $arg["data-default-checked"] = in_array($tg->tid, $ov->value_list(), true);
+                    $checked = in_array($tg->tid, $reqov->value_list(), true);
                     echo '<label class="checki cteltx"><span class="checkc">',
                         $this->render_checkbox($tg->tid, $checked, $arg),
                         '</span>', $topicset->unparse_name_html($tg->tid), '</label>';
@@ -220,8 +220,8 @@ abstract class CheckboxesBase_PaperOption extends PaperOption {
                 } else {
                     $tname = $topicset->unparse_name_html($tid);
                 }
-                $arg["data-default-checked"] = in_array($tid, $ov->value_list());
-                $checked = in_array($tid, $reqov->value_list());
+                $arg["data-default-checked"] = in_array($tid, $ov->value_list(), true);
+                $checked = in_array($tid, $reqov->value_list(), true);
                 echo ($isgroup ? '<label class="checki cteltx">' : '<li class="ctelt"><label class="checki ctelti">'),
                     '<span class="checkc">',
                     $this->render_checkbox($tid, $checked, $arg),

@@ -36,7 +36,7 @@ class Ht {
         "defer" => self::ATTR_BOOL,
         "disabled" => self::ATTR_BOOL,
         "formnovalidate" => self::ATTR_BOOL,
-        "hidden" > self::ATTR_BOOL,
+        "hidden" => self::ATTR_BOOL,
         "method" => self::ATTR_SKIP,
         "multiple" => self::ATTR_BOOL,
         "novalidate" => self::ATTR_BOOL,
@@ -162,17 +162,18 @@ class Ht {
             $action = substr($action, 0, $qpos) . htmlspecialchars((string) substr($decoded_query, $pos));
         }
 
-        $x = '<form';
+        if (!isset($extra["enctype"]) && $method !== "get") {
+            $extra["enctype"] = "multipart/form-data";
+        }
+
+        $x = '<form' . self::extra($extra);
         if ($action !== "" || isset($extra["method"])) {
             $x .= " method=\"{$method}\"";
         }
         if ($action !== "") {
             $x .= " action=\"{$action}\"";
         }
-        if (!isset($extra["enctype"]) && $method !== "get") {
-            $extra["enctype"] = "multipart/form-data";
-        }
-        return $x . ' accept-charset="UTF-8"' . self::extra($extra) . $suffix;
+        return $x . ' accept-charset="UTF-8"' . $suffix;
     }
 
     /** @param string $name
@@ -283,9 +284,12 @@ class Ht {
             self::$_lastcontrolid = $js["id"];
         }
         $t = '<input type="checkbox"'; /* NB see Ht::radio */
-        if ($name) {
+        if ((string) $name !== "") {
+            $t .= " name=\"{$name}\"";
+        }
+        if ($value !== "" || (string) $name !== "") {
             $v = htmlspecialchars((string) $value);
-            $t .= " name=\"{$name}\" value=\"{$v}\"";
+            $t .= " value=\"{$v}\"";
         }
         if ($checked) {
             $t .= " checked";
@@ -472,7 +476,8 @@ class Ht {
 
     /** @return string */
     static function pre_text_wrap($text) {
-        if (is_array($text) && !is_associative_array($text)
+        if (is_array($text)
+            && array_is_list($text)
             && array_reduce($text, function ($x, $s) { return $x && is_string($s); }, true)) {
             $text = join("\n", $text);
         } else if (is_array($text) || is_object($text)) {

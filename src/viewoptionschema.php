@@ -1,6 +1,6 @@
 <?php
 // viewoptionschema.php -- HotCRP helper class for view options
-// Copyright (c) 2006-2024 Eddie Kohler; see LICENSE.
+// Copyright (c) 2006-2025 Eddie Kohler; see LICENSE.
 
 class ViewOptionSchema {
     /** @var array<string,mixed> */
@@ -16,24 +16,28 @@ class ViewOptionSchema {
             $value = (string) $value;
         }
         $vlen = strlen($value);
-        $enumlen = strlen($enum);
+        $enumlen = strpos($enum, " ");
+        if ($enumlen === false) {
+            $enumlen = strlen($enum);
+        }
         if ($vlen === 0 || $vlen > $enumlen) {
             return null;
         }
         $first = $enum[0] === "=" ? 1 : 0;
         $p = $first;
         while (($pf = strpos($enum, $value, $p)) !== false) {
-            $ch0 = $pf === $first ? " " : $enum[$pf - 1];
-            $ch1 = $pf + $vlen === $enumlen ? " " : $enum[$pf + $vlen];
-            if (($ch0 === " " || $ch0 === ",")
-                && ($ch1 === " " || $ch1 === ",")) {
-                if (strpos($value, " ") !== false || strpos($value, ",") !== false) {
+            $ch0 = $pf === $first ? 59 /* ';' */ : ord($enum[$pf - 1]);
+            $ch1 = $pf + $vlen === $enumlen ? 59 : ord($enum[$pf + $vlen]);
+            if (($ch0 === 44 /* ',' */ || $ch0 === 59)
+                && ($ch1 === 44 || $ch1 === 59)) {
+                if (strpos($value, ",") !== false
+                    || strpos($value, ";") !== false) {
                     return null;
                 }
-                if ($ch0 === " ") {
+                if ($ch0 === 59) {
                     return $value;
                 }
-                if (($xch0 = strrpos($enum, " ", -($enumlen - $pf))) === false) {
+                if (($xch0 = strrpos($enum, ";", -($enumlen - $pf))) === false) {
                     $xch0 = -1;
                 }
                 $xch1 = strpos($enum, ",", $xch0 + 1);
@@ -52,17 +56,29 @@ class ViewOptionSchema {
             $xvalue = self::validate_enum($value, $schema->enum);
             return $xvalue ? [$name, $xvalue] : null;
         }
-        if (($schema->type ?? null) === "string") {
+        $type = $schema->type ?? null;
+        if ($type === "string") {
             if (is_bool($value)) {
                 $value = $value ? "yes" : "no";
             }
             return [$name, SearchWord::unquote((string) $value)];
+        } else if ($type === "int") {
+            if (($iv = stoi($value)) !== null
+                && (!isset($schema->min) || $iv >= $schema->min)) {
+                return [$name, $iv];
+            }
+        } else if ($type === "tag") {
+            if (is_string($value)
+                && Tagger::basic_check($value)) {
+                return [$name, $value];
+            }
+        } else { // boolean
+            $bv = is_string($value) ? friendly_boolean($value) : $value;
+            if (is_bool($bv)) {
+                return [$name, $bv];
+            }
         }
-        // else boolean
-        if (is_string($value)) {
-            $value = friendly_boolean($value);
-        }
-        return is_bool($value) ? [$name, $value] : null;
+        return null;
     }
 
     /** @param string|object $x
@@ -85,6 +101,15 @@ class ViewOptionSchema {
             } else if (str_ends_with($x, "\$")) {
                 $name = substr($x, 0, -1);
                 $schema = (object) ["type" => "string"];
+            } else if (str_ends_with($x, "#")) {
+                $name = substr($x, 0, -1);
+                $schema = (object) ["type" => "int"];
+            } else if (str_ends_with($x, "#+")) {
+                $name = substr($x, 0, -2);
+                $schema = (object) ["type" => "int", "min" => 1];
+            } else if (($colon = strpos($x, ":")) !== false) {
+                $name = substr($x, 0, $colon);
+                $schema = (object) ["type" => substr($name, $colon + 1)];
             } else if ($x !== "") {
                 $name = $x;
                 $schema = (object) [];
@@ -99,6 +124,12 @@ class ViewOptionSchema {
         }
         $this->a[$name] = $schema;
         return true;
+    }
+
+    /** @param string $name
+     * @return bool */
+    function has($name) {
+        return isset($this->a[$name]);
     }
 
     /** @param string|object $x
@@ -148,5 +179,15 @@ class ViewOptionSchema {
             return null;
         }
         return $lifted ?? $default;
+    }
+
+    /** @return list<string> */
+    function keys() {
+        $a = [];
+        foreach ($this->a as $name => $schema) {
+            if (!isset($schema->alias))
+                $a[] = $name;
+        }
+        return $a;
     }
 }

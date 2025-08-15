@@ -135,7 +135,7 @@ class PaperColumn extends Column {
 
     /** @return list<string> */
     static function user_view_option_schema() {
-        return ["format=given_name,first family_name,last"];
+        return ["format=given_name,first;family_name,last"];
     }
     /** @return int */
     function user_view_option_name_flags(Conf $conf) {
@@ -254,6 +254,11 @@ class Title_PaperColumn extends PaperColumn {
         if ($this->want_decoration) {
             $pl->qopts["tags"] = 1;
         }
+        if ($this->want_pdf
+            && !$pl->user->can_view_some_option($pl->conf->option_by_id(DTYPE_SUBMISSION))
+            && !$pl->user->can_view_some_option($pl->conf->option_by_id(DTYPE_FINAL))) {
+            $this->want_pdf = false;
+        }
         $this->highlight = $pl->search->has_field_highlighter("ti");
         return true;
     }
@@ -282,7 +287,12 @@ class Title_PaperColumn extends PaperColumn {
         $link = $pl->_paperLink($row);
         $t = "<a href=\"{$link}\" class=\"ptitle taghl{$klass_extra}\">{$highlight_text}</a>";
         if ($this->want_pdf) {
-            $t .= $pl->_contentDownload($row);
+            $dtype = $row->finalPaperStorageId > 0 ? DTYPE_FINAL : DTYPE_SUBMISSION;
+            if (($dtype === DTYPE_FINAL ? $row->finalPaperStorageId : $row->paperStorageId) > 1
+                && $pl->user->can_view_option($row, $pl->conf->option_by_id($dtype))
+                && ($doc = $row->document($dtype))) {
+                $t .= " " . $doc->link_html("", DocumentInfo::L_SMALL | DocumentInfo::L_NOSIZE | DocumentInfo::L_FINALTITLE);
+            }
         }
         if ($this->want_decoration
             && ($pl->row_tags !== "" || $pl->row_tags_override !== "")) {
@@ -888,20 +898,26 @@ abstract class ScoreGraph_PaperColumn extends PaperColumn {
 }
 
 class Score_PaperColumn extends ScoreGraph_PaperColumn {
+    /** @var bool */
+    private $any_review;
     function __construct(Conf $conf, $cj) {
         parent::__construct($conf, $cj);
         $this->override = PaperColumn::OVERRIDE_IFEMPTY;
         $this->format_field = $conf->checked_review_field($cj->review_field_id);
         assert($this->format_field instanceof Discrete_ReviewField);
     }
+    function view_option_schema() {
+        return make_array("anyre", "anyreview/anyre", "any/anyre", ...parent::view_option_schema());
+    }
     function prepare(PaperList $pl, $visible) {
         $bound = $pl->user->permissive_view_score_bound($pl->search->limit_term()->is_author());
         if ($this->format_field->view_score <= $bound) {
             return false;
         }
-        if ($visible && !in_array($this->format_field, $pl->qopts["scores"] ?? [])) {
+        if ($visible && !in_array($this->format_field, $pl->qopts["scores"] ?? [], true)) {
             $pl->qopts["scores"][] = $this->format_field;
         }
+        $this->any_review = !!$this->view_option("anyre");
         parent::prepare($pl, $visible);
         return true;
     }
@@ -911,7 +927,7 @@ class Score_PaperColumn extends ScoreGraph_PaperColumn {
         $row->ensure_review_field_order($f->order);
         $sci = new ScoreInfo;
         foreach ($row->viewable_reviews_as_display($pl->user) as $rrow) {
-            if ($rrow->reviewSubmitted
+            if (($this->any_review || $rrow->reviewSubmitted)
                 && ($fv = $rrow->fval($f)) !== null
                 && $f->view_score > $pl->user->view_score_bound($row, $rrow)) {
                 $sci->add($fv);

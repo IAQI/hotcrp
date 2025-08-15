@@ -487,7 +487,7 @@ class UserStatus extends MessageSet {
      * @return ?int */
     static function parse_follow_bit($s) {
         foreach (self::$follow_keywords as $b => $ns) {
-            if (in_array($s, $ns))
+            if (in_array($s, $ns, true))
                 return $b;
         }
         return null;
@@ -499,7 +499,7 @@ class UserStatus extends MessageSet {
             $x = preg_split('/[\s,;]+/', $x);
         }
         $res = [];
-        if (is_object($x) || is_associative_array($x)) {
+        if (is_object($x) || (is_array($x) && !array_is_list($x))) {
             foreach ((array) $x as $k => $v) {
                 $res[$lc ? strtolower($k) : $k] = $v;
             }
@@ -790,7 +790,9 @@ class UserStatus extends MessageSet {
      * @param ?MessageSet $ms
      * @return int */
     static function parse_roles($j, $old_roles, $ms = null) {
-        if (is_object($j) || is_associative_array($j)) {
+        $reset_roles = null;
+        $ignore_empty = false;
+        if (is_object($j) || (is_array($j) && !array_is_list($j))) {
             $reset_roles = true;
             $ij = [];
             foreach ((array) $j as $k => $v) {
@@ -802,10 +804,9 @@ class UserStatus extends MessageSet {
                 }
             }
         } else if (is_string($j)) {
-            $reset_roles = null;
+            $ignore_empty = true;
             $ij = preg_split('/[\s,;]+/', $j);
         } else if (is_array($j)) {
-            $reset_roles = null;
             $ij = $j;
         } else {
             if ($j !== null) {
@@ -819,11 +820,13 @@ class UserStatus extends MessageSet {
             if (!is_string($v)) {
                 $ms && $ms->error_at("roles", "<0>Format error in roles");
                 return $old_roles;
+            } else if ($v === "" && $ignore_empty) {
+                continue;
             }
             $action = null;
-            if (preg_match('/\A(\+|-|–|—|−)\s*(.*)\z/s', $v, $m)) {
-                $action = $m[1] === "+";
-                $v = $m[2];
+            if (preg_match('/\A(?:\+|-|–|—|−)/s', $v, $m)) {
+                $action = $m[0] === "+";
+                $v = substr($v, strlen($m[0]));
             }
             if ($v === "") {
                 $ms && $ms->error_at("roles", "<0>Format error in roles");
@@ -1191,7 +1194,7 @@ class UserStatus extends MessageSet {
         }
 
         // Disabled
-        $cflags = $user->cflags;
+        $old_cflags = $cflags = $user->cflags;
         if (isset($cj->disabled) && !$user->security_locked_here()) {
             if ($cj->disabled) {
                 $cflags |= Contact::CF_UDISABLED;
@@ -1203,8 +1206,12 @@ class UserStatus extends MessageSet {
             $cflags &= ~Contact::CF_PLACEHOLDER;
         }
         $user->set_prop("cflags", $cflags);
-        if ($user->prop_changed("disabled") && isset($cj->disabled)) {
-            $this->diffs[$cj->disabled ? "disabled" : "enabled"] = true;
+        if (isset($cj->disabled) && $old_cflags !== $cflags) {
+            $old_disabled = ($old_cflags & Contact::CFM_DISABLEMENT & Contact::CFM_DB) !== 0;
+            $new_disabled = ($cflags & Contact::CFM_DISABLEMENT & Contact::CFM_DB) !== 0;
+            if ($old_disabled !== $new_disabled) {
+                $this->diffs[$new_disabled ? "disabled" : "enabled"] = true;
+            }
         }
 
         // Follow
@@ -1525,10 +1532,10 @@ class UserStatus extends MessageSet {
 
     static function pc_role_text($cj) {
         if (isset($cj->roles)) {
-            assert(is_array($cj->roles) && !is_associative_array($cj->roles));
-            if (in_array("chair", $cj->roles)) {
+            assert(is_array($cj->roles) && array_is_list($cj->roles));
+            if (in_array("chair", $cj->roles, true)) {
                 return "chair";
-            } else if (in_array("pc", $cj->roles)) {
+            } else if (in_array("pc", $cj->roles, true)) {
                 return "pc";
             }
         }
@@ -1710,7 +1717,7 @@ class UserStatus extends MessageSet {
             $pcrole = $cpcrole = "none";
         }
         if (isset($us->qreq->pctype)
-            && in_array($us->qreq->pctype, ["chair", "pc", "none"])) {
+            && in_array($us->qreq->pctype, ["chair", "pc", "none"], true)) {
             $pcrole = $us->qreq->pctype;
         }
         $diffclass = $us->user->email ? "" : " ignore-diff";

@@ -77,9 +77,10 @@ class Paper_CLIBatch implements CLIBatchCommand {
         }
     }
 
-    /** @return bool */
+    /** @param string $pid
+     * @return bool */
     function valid_pid($pid) {
-        return ctype_digit($pid) || ($this->save && $pid === "new");
+        return ($this->save && $pid === "new") || stoi($pid) !== null;
     }
 
     /** @return int */
@@ -215,7 +216,8 @@ class Paper_CLIBatch implements CLIBatchCommand {
 
         $mode = "fetch";
         $argi = 0;
-        if ($argi < $argc && in_array($argv[$argi], ["fetch", "save", "test", "delete"])) {
+        if ($argi < $argc
+            && in_array($argv[$argi], ["fetch", "save", "test", "delete"], true)) {
             $mode = $argv[$argi];
             ++$argi;
         }
@@ -235,7 +237,7 @@ class Paper_CLIBatch implements CLIBatchCommand {
             if (!$pcb->valid_pid($arg["p"])) {
                 throw new CommandLineException("Invalid `-p PID`", $getopt);
             }
-            $pcb->p = intval($arg["p"]);
+            $pcb->p = stoi($arg["p"]);
         } else if ($pcb->delete) {
             throw new CommandLineException("Missing `-p PID`", $getopt);
         } else if (isset($arg["q"])) {

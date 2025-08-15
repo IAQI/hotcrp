@@ -24,7 +24,8 @@ class Authors_PaperOption extends PaperOption {
         $au = [];
         foreach (PaperInfo::parse_author_list($ov->data() ?? "") as $auth) {
             $au[] = $j = (object) $auth->unparse_nea_json();
-            if ($auth->email !== "" && in_array(strtolower($auth->email), $lemails)) {
+            if ($auth->email !== ""
+                && in_array(strtolower($auth->email), $lemails, true)) {
                 $j->contact = true;
             }
         }
@@ -197,12 +198,12 @@ class Authors_PaperOption extends PaperOption {
         return PaperValue::make($prow, $this, 1, join("\n", $v));
     }
     function parse_json(PaperInfo $prow, $j) {
-        if (!is_array($j) || is_associative_array($j)) {
+        if (!is_array($j) || !array_is_list($j)) {
             return PaperValue::make_estop($prow, $this, "<0>Validation error");
         }
         $v = $cemail = [];
         foreach ($j as $i => $auj) {
-            if (is_object($auj) || is_associative_array($auj)) {
+            if (is_object($auj) || (is_array($auj) && !array_is_list($auj))) {
                 $auth = Author::make_keyed($auj);
                 $contact = $auj->contact ?? null;
             } else if (is_string($auj)) {

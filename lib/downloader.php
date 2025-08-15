@@ -64,8 +64,8 @@ class Downloader {
             preg_match_all('/\d+-\d+|-\d+|\d+-/', $range, $m);
             foreach ($m[0] as $t) {
                 $dash = strpos($t, "-");
-                $r1 = $dash === 0 ? null : intval(substr($t, 0, $dash));
-                $r2 = $dash === strlen($t) - 1 ? null : intval(substr($t, $dash + 1));
+                $r1 = $dash === 0 ? null : stoi(substr($t, 0, $dash));
+                $r2 = $dash === strlen($t) - 1 ? null : stoi(substr($t, $dash + 1));
                 if ($r1 === null && $r2 !== 0) {
                     $dopt->range[] = $lastr = [$r1, $r2];
                 } else if ($r2 === null || ($r1 !== null && $r1 <= $r2)) {
@@ -106,8 +106,8 @@ class Downloader {
             preg_match_all('/\d+-\d+|-\d+|\d+-/', $range, $m);
             foreach ($m[0] as $t) {
                 $dash = strpos($t, "-");
-                $r1 = $dash === 0 ? null : intval(substr($t, 0, $dash));
-                $r2 = $dash === strlen($t) - 1 ? null : intval(substr($t, $dash + 1));
+                $r1 = $dash === 0 ? null : stoi(substr($t, 0, $dash));
+                $r2 = $dash === strlen($t) - 1 ? null : stoi(substr($t, $dash + 1));
                 if ($r1 === null && $r2 !== 0) {
                     $this->range[] = $lastr = [$r1, $r2];
                 } else if ($r2 === null || ($r1 !== null && $r1 <= $r2)) {
@@ -413,17 +413,10 @@ class Downloader {
         // XXX Chromium issue 961617: beware of X-Accel-Redirect if you are
         // using SameSite cookies!
         if ($this->_content_file !== null
-            && ($dar = Conf::$main->opt("docstoreAccelRedirect"))
-            && ($dsp = Filer::docstore_fixed_prefix(Conf::$main->docstore()))
             && !$this->no_accel
-            && !$this->head) {
-            assert(str_ends_with($dsp, "/"));
-            if (str_starts_with($this->_content_file, $dsp)
-                && strlen($this->_content_file) > strlen($dsp)
-                && $this->_content_file[strlen($dsp)] !== "/") {
-                $this->_content_redirect = "{$dar}" . substr($this->_content_file, strlen($dsp));
-                $this->_content_file = null;
-            }
+            && !$this->head
+            && ($dar = Conf::$main->opt("docstoreAccelRedirect"))) {
+            $this->_try_content_redirect($dar);
         }
         // check for X-Accel-Redirect
         if ($this->_content_redirect !== null) {
@@ -441,6 +434,28 @@ class Downloader {
                 self::readfile_subrange($out, $r[0], $r[1], 0, $this->_content_file, $this->content_length);
             } else {
                 self::print_subrange($out, $r[0], $r[1], 0, $this->_content);
+            }
+        }
+    }
+
+    /** @param string|list<string> $dars */
+    private function _try_content_redirect($dars) {
+        $ds = Conf::$main->docstore();
+        foreach (is_string($dars) ? [$dars] : $dars as $dar) {
+            if (($sp = strpos($dar, " "))) {
+                $root = substr($dar, $sp + 1);
+                $dar = substr($dar, 0, $sp);
+            } else if ($ds) {
+                $root = $ds->root();
+            } else {
+                continue;
+            }
+            if (str_starts_with($this->_content_file, $root)
+                && strlen($this->_content_file) > strlen($root)
+                && $this->_content_file[strlen($root)] !== "/") {
+                $this->_content_redirect = $dar . substr($this->_content_file, strlen($root));
+                $this->_content_file = null;
+                return;
             }
         }
     }

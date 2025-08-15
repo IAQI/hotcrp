@@ -1,6 +1,6 @@
 <?php
 // backupdb.php -- HotCRP database backup script
-// Copyright (c) 2006-2023 Eddie Kohler; see LICENSE.
+// Copyright (c) 2006-2025 Eddie Kohler; see LICENSE.
 
 if (realpath($_SERVER["PHP_SELF"]) === __FILE__) {
     require_once(dirname(__DIR__) . "/src/init.php");
@@ -20,6 +20,9 @@ class BackupDB_Batch {
     public $verbose;
     /** @var bool */
     public $compress;
+    /** @var bool
+     * @readonly */
+    public $raw;
     /** @var bool
      * @readonly */
     public $schema;
@@ -147,11 +150,15 @@ class BackupDB_Batch {
 
         $this->verbose = isset($arg["V"]);
         $this->compress = isset($arg["z"]);
+        $this->raw = isset($arg["raw"]);
         $this->schema = isset($arg["schema"]);
         $this->skip_ephemeral = isset($arg["no-ephemeral"]);
         $this->single_transaction = true;
         $this->tablespaces = isset($arg["tablespaces"]);
         $this->count = $arg["count"] ?? 1;
+        if ($this->raw && ($this->schema || $this->skip_ephemeral)) {
+            $this->throw_error("`--raw` and `--schema`/`--no-ephemeral` conflict");
+        }
 
         $this->pc_only = isset($arg["pc"]);
         $this->only_tables = $arg["only"] ?? [];
@@ -231,11 +238,11 @@ class BackupDB_Batch {
         $input = $arg["input"] ?? null;
         $output = $arg["output"] ?? null;
         if ($input !== null
-            && in_array($this->subcommand, [self::S3_LIST, self::S3_GET, self::S3_RESTORE])) {
+            && in_array($this->subcommand, [self::S3_LIST, self::S3_GET, self::S3_RESTORE], true)) {
             $this->throw_error("Mode incompatible with `-i`");
         }
         if ($output !== null
-            && in_array($this->subcommand, [self::RESTORE, self::S3_LIST, self::S3_PUT, self::S3_RESTORE])) {
+            && in_array($this->subcommand, [self::RESTORE, self::S3_LIST, self::S3_PUT, self::S3_RESTORE], true)) {
             $this->throw_error("Mode incompatible with `-o`");
         }
 
@@ -479,7 +486,7 @@ class BackupDB_Batch {
 
     private function update_maybe_ephemeral() {
         $this->_maybe_ephemeral = 0;
-        if ($this->_inserting === $this->_created) {
+        if ($this->_inserting === $this->_created && $this->skip_ephemeral) {
             if ($this->_inserting === "settings"
                 && $this->_fields[0] === "name") {
                 $this->_maybe_ephemeral = 1;
@@ -603,6 +610,7 @@ class BackupDB_Batch {
         $p = 0;
         $l = strlen($s);
         if ($this->_inserting === null
+            && !$this->raw
             && str_starts_with($s, "INSERT")
             && preg_match('/\G(INSERT INTO `?([^`\s]*)`? VALUES)\s*(?=[(,]|$)/', $s, $m, 0, $p)) {
             $this->_inserting = strtolower($m[2]);
@@ -618,7 +626,7 @@ class BackupDB_Batch {
                 if ($p === $l) {
                     break;
                 } else if ($ch === "(") {
-                    if (!preg_match('/\G\((?:[^\\\\\')]|\'(?:[^\\\\\']|\\\\.)*+\')*+\)/s', $s, $m, 0, $p)) {
+                    if (!preg_match('/\G\((?:[^\')]*+(?:\'(?:[^\\\\\']*+(?:\\\\.)?+)*+\')?+)*+\)/s', $s, $m, 0, $p)) {
                         break;
                     }
                     if ($this->_maybe_ephemeral === 0
@@ -644,15 +652,17 @@ class BackupDB_Batch {
                     ++$p;
                 }
                 $this->_inserting = null;
+                $this->_separator = "";
                 break;
             }
         }
-        if (str_ends_with($s, "\n")) {
+        if ($p !== $l && str_ends_with($s, "\n")) {
+            $this->fwrite($this->_separator);
             $this->fwrite($p === 0 ? $s : substr($s, $p));
+            $this->_separator = "";
             return "";
-        } else {
-            return substr($s, $p);
         }
+        return substr($s, $p);
     }
 
     private function transfer() {
@@ -892,6 +902,7 @@ class BackupDB_Batch {
             "input:,in:,i: =DUMP Read input from file",
             "output:,out:,o: =DUMP Send output to file",
             "z,compress Compress output",
+            "raw Do not post-process SQL",
             "schema Output schema only",
             "no-ephemeral Omit ephemeral settings and values",
             "skip-comments Omit comments",

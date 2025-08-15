@@ -2573,20 +2573,21 @@ class PaperInfo {
     }
 
     function ensure_primary_documents() {
-        if (!$this->_primary_document && count($this->_row_set) > 1) {
-            $psids = [];
-            foreach ($this->_row_set as $prow) {
-                $psids[] = $prow->finalPaperStorageId <= 0 ? $prow->paperStorageId : $prow->finalPaperStorageId;
-            }
-            $result = $this->conf->qe("select " . $this->conf->document_query_fields() . " from PaperStorage where paperStorageId?a", $psids);
-            while (($di = DocumentInfo::fetch($result, $this->conf))) {
-                if (($prow = $this->_row_set->get($di->paperId))) {
-                    $di->prow = $prow;
-                    $prow->_primary_document = $di;
-                }
-            }
-            Dbl::free($result);
+        if ($this->_primary_document || count($this->_row_set) <= 1) {
+            return;
         }
+        $psids = [];
+        foreach ($this->_row_set as $prow) {
+            $psids[] = $prow->finalPaperStorageId <= 0 ? $prow->paperStorageId : $prow->finalPaperStorageId;
+        }
+        $result = $this->conf->qe("select " . $this->conf->document_query_fields() . " from PaperStorage where paperStorageId?a", $psids);
+        while (($di = DocumentInfo::fetch($result, $this->conf))) {
+            if (($prow = $this->_row_set->get($di->paperId))) {
+                $di->prow = $prow;
+                $prow->_primary_document = $di;
+            }
+        }
+        Dbl::free($result);
     }
 
     /** @return ?DocumentInfo */
@@ -2949,7 +2950,7 @@ class PaperInfo {
             if ($rrow->contactId == $cid
                 || ($rev_tokens
                     && $rrow->reviewToken
-                    && in_array($rrow->reviewToken, $rev_tokens))) {
+                    && in_array($rrow->reviewToken, $rev_tokens, true))) {
                 $rrows[] = $rrow;
             }
         }

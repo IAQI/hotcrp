@@ -126,26 +126,33 @@ class LoginHelper {
     /** @param Contact $user
      * @return array{ok:true,user:Contact}|array{ok:false,disabled?:true,email?:true} */
     static function check_external_login($user) {
-        $cdbuser = $user->cdb_user();
-        if ($cdbuser && $cdbuser->is_disabled()) {
+        if ($user->contactdb_disabled()) {
             return ["ok" => false, "disabled" => true, "email" => true];
         }
         if (!$user->contactId) {
+            // Contact::SAVE_SELF_REGISTER checks allow_self_register
             $user->store(Contact::SAVE_ANY_EMAIL | Contact::SAVE_SELF_REGISTER);
         }
-        if ($user->is_disabled()) {
-            return ["ok" => false, "disabled" => true, "email" => true];
-        } else if (!$user->contactId
-                   || ($user->is_dormant() && !$user->conf->allow_user_self_register())) {
+        if ((!$user->contactId || $user->is_placeholder())
+            && !$user->allow_self_register()) {
             return ["ok" => false, "email" => true, "noaccount" => true];
+        } else if ($user->is_disabled()) {
+            return ["ok" => false, "disabled" => true, "email" => true];
         } else {
             return ["ok" => true, "user" => $user];
         }
     }
 
-    /** @param array{ok:true,user:Contact} $info
-     * @return array{ok:true,user:Contact,redirect:string,firstuser?:true} */
+    /** @param array{ok:true,user:Contact}|array{ok:false} $info
+     * @return array{ok:true,user:Contact,redirect:string,firstuser?:true}|array{ok:false} */
     static function login_complete($info, Qrequest $qreq) {
+        if (!$info["ok"]) {
+            foreach ($info["usec"] ?? [] as $use) {
+                $use->store($qreq->qsession());
+            }
+            return $info;
+        }
+
         assert($info["ok"] && $info["user"]);
         $luser = $info["user"];
 
@@ -189,9 +196,8 @@ class LoginHelper {
             $user->ensure_account_here()->save_roles(Contact::ROLE_ADMIN, null);
             $user->conf->save_setting("setupPhase", null);
             return true;
-        } else {
-            return false;
         }
+        return false;
     }
 
     static function check_postlogin(Contact $user, Qrequest $qreq) {
@@ -288,8 +294,8 @@ class LoginHelper {
         // disabled users get mail saying they're disabled
         if ($user->is_disabled()
             || ($cdbu && $cdbu->is_disabled())
-            || ((!$user->contactId || $user->is_dormant())
-                && !$conf->allow_user_self_register())) {
+            || ((!$user->contactId || $user->is_placeholder())
+                && !$user->allow_self_register())) {
             $template = "@resetdisabled";
         } else {
             $template = "@resetpassword";

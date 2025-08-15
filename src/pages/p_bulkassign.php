@@ -122,8 +122,11 @@ class BulkAssign_Page {
     function complete_assignment($callback) {
         if (isset($this->qreq->data)) {
             $content = $this->qreq->data;
+        } else if (isset($this->qreq->data_source)
+                   && ($ds = $this->conf->docstore())) {
+            $content = $ds->open_tempfile($this->qreq->data_source, "bulkassign-%s.csv");
         } else {
-            $content = Filer::check_docstore_tempfile($this->qreq->data_source, "bulkassign-%s.csv", $this->conf);
+            $content = null;
         }
         if (!$content) {
             return false;
@@ -341,7 +344,7 @@ Assignment methods:
 
         $limits = PaperSearch::viewable_limits($this->user);
         echo '<p class="mt-5 mb-2"><label>Paper collection: ',
-            PaperSearch::limit_selector($this->conf, $limits, in_array("all", $limits) ? "all" : PaperSearch::default_limit($this->user, $limits), ["class" => "ml-1"]),
+            PaperSearch::limit_selector($this->conf, $limits, in_array("all", $limits, true) ? "all" : PaperSearch::default_limit($this->user, $limits), ["class" => "ml-1"]),
             '</label></p>';
 
         echo '<div id="foldoptions" class="mb-5 foldc fold2c fold3c">',

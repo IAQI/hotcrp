@@ -161,8 +161,8 @@ class Conf {
     private $_dtz;
     /** @var array<int,FormatSpec> */
     private $_formatspec_cache = [];
-    /** @var ?non-empty-string */
-    private $_docstore;
+    /** @var false|null|Docstore */
+    private $_docstore = false;
     /** @var array<int,Formula> */
     private $_defined_formulas;
     private $_emoji_codes;
@@ -237,6 +237,8 @@ class Conf {
     static public $blocked_time = 0.0;
     /** @var false|null|\mysqli */
     static private $_cdb = false;
+    /** @var ?list<Conf> */
+    static private $_conf_update_list;
 
     /** @var bool */
     static public $test_mode;
@@ -311,6 +313,13 @@ class Conf {
         }
     }
 
+    /** @suppress PhanAccessReadOnlyProperty */
+    function close() {
+        $this->save_cdb_user_updates();
+        $this->dblink->close();
+        $this->dblink = null;
+    }
+
 
     //
     // Initialization functions
@@ -355,7 +364,7 @@ class Conf {
 
     function load_settings() {
         $this->__load_settings();
-        if ($this->sversion < 310) {
+        if ($this->sversion < 311) {
             $old_nerrors = Dbl::$nerrors;
             while ((new UpdateSchema($this))->run()) {
                 usleep(50000);
@@ -698,38 +707,14 @@ class Conf {
 
         // check passwordHashMethod
         if (isset($this->opt["passwordHashMethod"])
-            && !in_array($this->opt["passwordHashMethod"], password_algos())) {
+            && !in_array($this->opt["passwordHashMethod"], password_algos(), true)) {
             unset($this->opt["passwordHashMethod"]);
         }
 
-        // docstore
-        $docstore = $this->opt["docstore"] ?? null;
-        $dpath = "";
-        $dpsubdir = $this->opt["docstoreSubdir"] ?? null;
-        if (is_string($docstore)) {
-            $dpath = $docstore;
-        } else if ($docstore === true) {
-            $dpath = "docs";
-        }
-        if ($dpath !== "") {
-            if ($dpath[0] !== "/") {
-                $dpath = SiteLoader::$root . "/" . $dpath;
-            }
-            if (strpos($dpath, "%") === false) {
-                $dpath .= ($dpath[strlen($dpath) - 1] === "/" ? "" : "/");
-                if ($dpsubdir && ($dpsubdir === true || $dpsubdir > 0)) {
-                    $dpath .= "%" . ($dpsubdir === true ? 2 : $dpsubdir) . "h/";
-                }
-                $dpath .= "%h%x";
-            }
-            $this->_docstore = $dpath;
-        } else {
-            $this->_docstore = null;
-        }
-
-        // S3 settings and dbNoPapers
+        // docstore, S3, dbNoPapers
+        $this->_docstore = false;
         if (($this->opt["dbNoPapers"] ?? null)
-            && !$this->_docstore
+            && !($this->opt["docstore"] ?? null)
             && !($this->opt["s3_bucket"] ?? null)) {
             unset($this->opt["dbNoPapers"]);
         }
@@ -1110,9 +1095,25 @@ class Conf {
         return $this->_formatspec_cache[$dtype];
     }
 
-    /** @return ?non-empty-string */
+    /** @return ?Docstore */
     function docstore() {
+        if ($this->_docstore === false) {
+            $this->_docstore = Docstore::make($this->opt["docstore"] ?? null, $this->opt["docstoreSubdir"] ?? null);
+            if ($this->_docstore
+                && ($dsbus = $this->opt["docstoreBackup"] ?? null)) {
+                foreach (is_string($dsbus) ? [$dsbus] : $dsbus as $dsp) {
+                    if (($ds = Docstore::make($dsp, $this->opt["docstoreSubdir"] ?? null)))
+                        $this->_docstore->append_backup($ds);
+                }
+            }
+        }
         return $this->_docstore;
+    }
+
+    /** @return ?string */
+    function docstore_tempdir() {
+        $ds = $this->docstore();
+        return $ds ? $ds->tempdir() : null;
     }
 
     /** @return ?S3Client */
@@ -1751,9 +1752,8 @@ class Conf {
             return "Invalid round name (must start with a letter and contain only letters, numbers, and dashes)";
         } else if (preg_match('/\A(?:none|any|all|span|default|undefined|unnamed|.*(?:draft|response|review)|(?:draft|response).*|pri(?:mary)|sec(?:ondary)|opt(?:ional)|pc|ext(?:ernal)|meta)\z/i', $rname)) {
             return "Round name ‘{$rname}’ is reserved";
-        } else {
-            return false;
         }
+        return false;
     }
 
     /** @param ?string $rname
@@ -1768,9 +1768,8 @@ class Conf {
             return "";
         } else if (self::round_name_error($rname)) {
             return false;
-        } else {
-            return $rname;
         }
+        return $rname;
     }
 
     /** @param int|bool $external
@@ -1965,9 +1964,8 @@ class Conf {
             return -1;
         } else if ($bd === "highlight" && $ad !== "highlight") {
             return 1;
-        } else {
-            return $this->collator()->compare($a->name, $b->name);
         }
+        return $this->collator()->compare($a->name, $b->name);
     }
 
 
@@ -1995,14 +1993,14 @@ class Conf {
 
     /** @return bool */
     function allow_user_self_register() {
+        // see also Contact::allow_self_register
         return !$this->disable_non_pc() && !$this->opt("disableNewUsers");
     }
 
     /** @return array<string,object> */
     function oauth_providers() {
         if ($this->_oauth_providers === null) {
-            $k = isset($this->opt["oAuthProviders"]) ? "oAuthProviders" : "oAuthTypes" /* XXX */;
-            $this->_oauth_providers = $this->_xtbuild_resolve([], $k);
+            $this->_oauth_providers = $this->_xtbuild_resolve([], "oAuthProviders");
         }
         return $this->_oauth_providers;
     }
@@ -2690,9 +2688,8 @@ class Conf {
             $t = " " . join("#0 ", $this->pc_tags()) . "#0";
             $t = $this->tags()->censor(TagMap::CENSOR_VIEW, $t, $viewer, null);
             return explode("#0 ", substr($t, 1, -2));
-        } else {
-            return [];
         }
+        return [];
     }
 
 
@@ -2706,9 +2703,8 @@ class Conf {
                 "dsn" => $dsn,
                 "dbSocket" => $opt["contactdbSocket"] ?? $opt["dbSocket"] ?? null
             ]);
-        } else {
-            return null;
         }
+        return null;
     }
 
     /** @return ?\mysqli */
@@ -2725,9 +2721,8 @@ class Conf {
     static function main_cdb_qe(...$args) {
         if (($cdb = self::main_contactdb())) {
             return Dbl::do_query_on($cdb, $args, Dbl::F_ERROR);
-        } else {
-            return Dbl_Result::make_error();
         }
+        return Dbl_Result::make_error();
     }
 
     /** @return ?\mysqli */
@@ -2910,7 +2905,11 @@ class Conf {
      * @param 0|1|2|3 $type */
     function register_cdb_user_update($user, $type) {
         if ($this->_cdb_user_update_list === null) {
-            register_shutdown_function([$this, "save_cdb_user_updates"]);
+            if (self::$_conf_update_list === null) {
+                register_shutdown_function("Conf::perform_conf_updates");
+                self::$_conf_update_list = [];
+            }
+            self::$_conf_update_list[] = $this;
             $this->_cdb_user_update_list = [];
         }
         if ($type === self::CDB_UPDATE_PROFILE) {
@@ -2922,12 +2921,23 @@ class Conf {
         }
     }
 
+    static function perform_conf_updates() {
+        $culist = self::$_conf_update_list;
+        self::$_conf_update_list = [];
+        foreach ($culist as $conf) {
+            $conf->save_cdb_user_updates();
+        }
+    }
+
     function save_cdb_user_updates() {
         $ulist = $this->_cdb_user_update_list;
         $this->_cdb_user_update_list = null;
+        while (($cuindex = array_search($this, self::$_conf_update_list ?? [], true)) !== false) {
+            array_splice(self::$_conf_update_list, $cuindex, 1);
+        }
+
         $cdb = $this->contactdb();
         $cdb_confid = $this->cdb_confid();
-
         if (empty($ulist) || !$cdb || $cdb_confid < 0) {
             return;
         }
@@ -4578,13 +4588,7 @@ class Conf {
         $qreq->set_paper(null);
         $prow = null;
         if ($qreq->p) {
-            if (is_int($qreq->p)) {
-                $pid = $qreq->p;
-            } else if (ctype_digit($qreq->p)) {
-                $pid = intval($qreq->p);
-            } else {
-                $pid = 0;
-            }
+            $pid = stoi($qreq->p) ?? 0;
             if ($pid > 0 && $pid <= PaperInfo::PID_MAX) {
                 $prow = $this->paper_by_id($pid, $user);
             }
@@ -4929,18 +4933,15 @@ class Conf {
         }
         $siteinfo["user"] = $userinfo;
 
-        $pid = $extra["paperId"] ?? 0;
-        if (!is_int($pid)) {
-            $pid = $pid && ctype_digit($pid) ? intval($pid) : 0;
-        }
+        $pid = stoi($extra["paperId"] ?? 0) ?? 0;
         if ($pid > 0 && $qreq->paper()) {
             $pid = $qreq->paper()->paperId;
         }
         if ($pid > 0) {
             $siteinfo["paperid"] = $pid;
-        }
-        if ($pid > 0 && $user && $user->is_admin_force()) {
-            $siteinfo["want_override_conflict"] = true;
+            if ($user && $user->is_admin_force()) {
+                $siteinfo["want_override_conflict"] = true;
+            }
         }
 
         Ht::stash_script("window.siteinfo=" . json_encode_browser($siteinfo));
@@ -5326,7 +5327,7 @@ class Conf {
                 foreach ($paper->reviews_as_display() as $rrow) {
                     if ($rrow->reviewType === REVIEW_EXTERNAL
                         && !$rrow->reviewToken
-                        && !in_array($rrow->contactId, $ercids)) {
+                        && !in_array($rrow->contactId, $ercids, true)) {
                         $erlist[] = $this->user_json(null, $rrow->reviewer(), $flags);
                         $ercids[] = $rrow->contactId;
                     }

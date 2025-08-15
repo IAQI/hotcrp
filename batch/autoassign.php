@@ -1,6 +1,6 @@
 <?php /*{hotcrp Autoassign_Batch}*/
 // autoassign.php -- HotCRP autoassignment script
-// Copyright (c) 2006-2024 Eddie Kohler; see LICENSE.
+// Copyright (c) 2006-2025 Eddie Kohler; see LICENSE.
 
 if (realpath($_SERVER["PHP_SELF"]) === __FILE__) {
     require_once(dirname(__DIR__) . "/src/init.php");
@@ -257,9 +257,9 @@ class Autoassign_Batch {
         if (str_starts_with($this->gj->function, "+")) {
             $class = substr($this->gj->function, 1);
             /** @phan-suppress-next-line PhanTypeExpectedObjectOrClassName */
-            $aa = new $class($this->user, $this->pcc, $pids, $this->param, $this->gj);
+            $aa = new $class($this->user, $this->gj);
         } else {
-            $aa = call_user_func($this->gj->function, $this->user, $this->pcc, $pids, $this->param, $this->gj);
+            $aa = call_user_func($this->gj->function, $this->user, $this->gj);
         }
         '@phan-var-force Autoassigner $aa';
         foreach ($this->no_coassign as $l) {
@@ -270,6 +270,12 @@ class Autoassign_Batch {
                 }
             }
         }
+        foreach ($this->param as $k => $v) {
+            $aa->set_option($k, $v);
+        }
+        $aa->set_user_ids($this->pcc);
+        $aa->set_paper_ids($pids);
+        $aa->configure();
         $this->report($aa->message_list(), $aa->has_error() ? 1 : null);
 
         // run autoassigner
