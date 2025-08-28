@@ -1954,7 +1954,7 @@ class PaperTable {
     private function _edit_message_not_submitted($is_author) {
         $missing = PaperTable::missing_required_fields($this->prow);
         if ($missing) {
-            $this->_main_message(MessageSet::URGENT_NOTE, $this->conf->_("<5>This {submission} is not ready for review. Required fields {:list} are missing.", PaperTable::field_title_links($missing, "missing_title")));
+            $this->_main_message(MessageSet::URGENT_NOTE, $this->conf->_("<5>This {submission} is not ready for review. Required fields {:list} are incomplete.", PaperTable::field_title_links($missing, "missing_title")));
         }
 
         $auuser = $is_author ? $this->user : $this->prow->author_user();
@@ -2114,9 +2114,8 @@ class PaperTable {
             return "Save draft";
         } else if ($this->prow->timeSubmitted > 0) {
             return "Save and resubmit";
-        } else {
-            return "Save and submit";
         }
+        return "Save and submit";
     }
 
     private function _collect_actions() {

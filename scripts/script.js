@@ -11455,26 +11455,44 @@ function fold_field(plistui, f, folded) {
 }
 
 function make_callback(plistui, type) {
-    let f, values, tr;
+    let f, result, tr, vindex = 0, vimap;
+    function find_data(pid) {
+        const p = result.papers[vindex];
+        if (p && p.pid === pid) {
+            ++vindex;
+            return p;
+        }
+        if (vimap == null) {
+            vimap = {};
+            for (const vp of result.papers) {
+                vimap[vp.pid] = vp;
+            }
+        }
+        return vimap[pid] || null;
+    }
     function render_some() {
-        let index = plistui.field_index(f), htmlk = f.name, n = 0,
-            table = tr.closest("table");
+        const index = plistui.field_index(f), htmlk = f.name;
+        let n = 0, table = tr.closest("table");
         while (n < 64 && tr) {
             if (tr.nodeName === "TR"
                 && tr.hasAttribute("data-pid")
                 && hasClass(tr, "pl")) {
                 const p = +tr.getAttribute("data-pid"),
-                    data = values.data[p],
-                    attr = values.attr && values.attr[p],
-                    classes = values.classes && values.classes[p];
-                if (attr) {
-                    for (const k in attr) {
-                        tr.setAttribute(k, attr[k]);
-                    }
-                }
+                    data = find_data(p);
                 if (data) {
-                    const e = plistui.pidfield(p, f, index);
-                    set_pidfield(f, e, data[htmlk], classes && classes[htmlk]);
+                    const attr = data["$attributes"];
+                    if (attr) {
+                        for (const k in attr) {
+                            tr.setAttribute(k, attr[k]);
+                        }
+                    }
+                    const e = plistui.pidfield(p, f, index),
+                        content = data[htmlk] || "";
+                    if (typeof content === "string") {
+                        set_pidfield(f, e, content);
+                    } else {
+                        set_pidfield(f, e, content.html, content.classes);
+                    }
                 }
                 ++n;
             }
@@ -11500,8 +11518,8 @@ function make_callback(plistui, type) {
         ensure_field(plistui, f);
         tr = plistui.pltable.querySelector("tr.pl");
         tr && render_some();
-        if (values.stat && f.name in values.stat) {
-            render_statistics(values.stat[f.name]);
+        if (result.statistics && f.name in result.statistics) {
+            render_statistics(result.statistics[f.name]);
         }
         check_statistics(plistui);
     }
@@ -11509,10 +11527,10 @@ function make_callback(plistui, type) {
         if (!rv.ok) {
             return;
         }
-        if (rv.fields && rv.fields[type]) {
-            plistui.load_field(rv.fields[type]);
+        for (let fv of rv.fields || []) {
+            plistui.load_field(fv);
         }
-        values = rv;
+        result = rv;
         $(render_start);
     };
 }
@@ -11569,12 +11587,12 @@ function plinfo(plistui, type, hidden, form) {
     const pctr = plistui.pltable;
     let ses = pctr.getAttribute("data-fold-session-prefix");
     if (need_load) {
-        const loadargs = {fn: "fieldhtml", f: load_type};
+        const loadargs = {f: load_type, format: "html"};
         if (ses) {
             loadargs.session = plinfo_session(ses, type, hidden, form);
             ses = null;
         }
-        $.get(hoturl("=api", $.extend(loadargs, hotlist_search_params(pctr, true))),
+        $.get(hoturl("=api/search", $.extend(loadargs, hotlist_search_params(pctr, true))),
               make_callback(plistui, type));
     } else if (hidden !== (!f || f.missing || f.hidden)) {
         fold_field(plistui, f, hidden);
@@ -12761,60 +12779,71 @@ function evaluate_edit_condition(ec, form) {
         return ec;
     } else if (edit_conditions[ec.type]) {
         return edit_conditions[ec.type](ec, form);
-    } else {
-        throw new Error("unknown edit condition " + ec.type);
     }
+    throw new Error("unknown edit condition " + ec.type);
 }
 
 edit_conditions.and = function (ec, form) {
-    for (var i = 0; i !== ec.child.length; ++i)
-        if (!evaluate_edit_condition(ec.child[i], form))
+    for (const ch of ec.child) {
+        if (!evaluate_edit_condition(ch, form))
             return false;
+    }
     return true;
 };
 edit_conditions.or = function (ec, form) {
-    for (var i = 0; i !== ec.child.length; ++i)
-        if (evaluate_edit_condition(ec.child[i], form))
+    for (const ch of ec.child) {
+        if (evaluate_edit_condition(ch, form))
             return true;
+    }
     return false;
 };
 edit_conditions.not = function (ec, form) {
     return !evaluate_edit_condition(ec.child[0], form);
 };
 edit_conditions.xor = function (ec, form) {
-    var x = false;
-    for (var i = 0; i !== ec.child.length; ++i)
-        if (evaluate_edit_condition(ec.child[i], form))
+    let x = false;
+    for (const ch of ec.child) {
+        if (evaluate_edit_condition(ch, form))
             x = !x;
+    }
     return x;
 };
 edit_conditions.checkbox = function (ec, form) {
-    var e = form.elements[ec.formid];
+    const e = form.elements[ec.formid];
     return e && e.checked;
 };
 edit_conditions.checkboxes = function (ec, form) {
-    var vs = ec.values;
+    const vs = ec.values;
     if (vs === false || vs === true || vs == null) {
-        var es = form.elements[ec.formid].querySelectorAll("input:checked");
+        const es = form.elements[ec.formid].querySelectorAll("input:checked");
         return (vs === false) === (es.length === 0);
     }
-    for (var i = 0; i !== vs.length; ++i) {
-        if (form.elements[ec.formid + ":" + vs[i]].checked)
+    for (const v of vs) {
+        if (form.elements[ec.formid + ":" + v].checked)
             return true;
     }
     return false;
 };
+edit_conditions.all_checkboxes = function (ec, form) {
+    const es = form.elements[ec.formid].querySelectorAll("input[type=checkbox]");
+    for (const e of es) {
+        if (!e.checked)
+            return false;
+    }
+    return true;
+};
 edit_conditions.dropdown = function (ec, form) {
-    var e = form.elements[ec.formid];
+    const e = form.elements[ec.formid];
     return e && e.value ? +e.value : false;
 };
 edit_conditions.text_present = function (ec, form) {
-    var e = form.elements[ec.formid];
+    const e = form.elements[ec.formid];
     return $.trim(e ? e.value : "") !== "";
 };
 edit_conditions.numeric = function (ec, form) {
-    var e = form.elements[ec.formid],
-        v = (e ? e.value : "").trim(), n;
+    const e = form.elements[ec.formid],
+        v = (e ? e.value : "").trim();
+    let n;
     return v !== "" && !isNaN((n = parseFloat(v))) ? n : null;
 };
 edit_conditions.document_count = function (ec, form) {
@@ -13844,8 +13873,8 @@ handle_ui.on("js-submit-list", function (evt) {
     // choose action
     var form = this, fn = "", fnbutton, e, ne, i, es;
     if (this instanceof HTMLButtonElement) {
-        fn = this.value;
         fnbutton = this;
+        fn = this.value;
         form = this.form;
     } else if ((e = form.elements.defaultfn) && e.value) {
         fn = e.value;
@@ -13996,6 +14025,38 @@ handle_ui.on("js-submit-list", function (evt) {
         bgform.action = action;
         bgform.submit();
     }
+});
+
+handle_ui.on("js-selector-summary", function (evt) {
+    if (this.elements["pap[]"]) {
+        return;
+    }
+    if (this.elements.pap) {
+        this.elements.pap.remove();
+    }
+    let any = false;
+    const chkval = [], chknumval = [];
+    for (const e of this.querySelectorAll("input.js-selector")) {
+        any = true;
+        if (e.checked) {
+            const v = e.value;
+            chkval.push(v);
+            if (chknumval && ((v | 0) != v || v.startsWith("0"))) {
+                chknumval = null;
+            }
+            if (chknumval) {
+                chknumval.push(v | 0);
+            }
+        }
+    }
+    if (any && !chkval.length) {
+        alert("Nothing selected.");
+        return;
+    }
+    const chktxt = chknumval && chknumval.length > 30
+        ? encode_session_list_ids(chknumval)
+        : chkval.join(" ");
+    this.appendChild(hidden_input("pap", chktxt));
 });
 
 
@@ -14659,10 +14720,15 @@ $(function () {
         return p.join(">");
     }
     var err = [], elt = [];
-    $(".xinfo,.xconfirm,.xwarning,.xmerror,.aa,.strong,td.textarea,a.btn[href=''],.p,.mg,.editor").each(function () {
+    let e = document.querySelector(".js-selector");
+    if (e && e.form && (!hasClass(e.form, "ui-submit") || (!hasClass(e.form, "js-selector-summary") && !hasClass(e.form, "js-submit-list")))) {
+        err.push(locator(e.form) + ": no .js-selector-summary");
+        elt.push(e.form);
+    }
+    /*$(".xinfo,.xconfirm,.xwarning,.xmerror,.aa,.strong,td.textarea,a.btn[href=''],.p,.mg,.editor").each(function () {
         err.push(locator(this));
         elt.push(this);
-    });
+    });*/
     if (document.documentMode || window.attachEvent) {
         var msg = $('<div class="msg msg-error"></div>').appendTo("#h-messages");
         feedback.append_item_near(msg[0], {message: "<0>This site no longer supports Internet Explorer", status: 2});

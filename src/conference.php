@@ -131,6 +131,8 @@ class Conf {
     private $_user_cache_missing;
     /** @var ?array<string,Contact> */
     private $_user_email_cache;
+    /** @var ?array<int,int|list<int>> */
+    private $_linked_user_cache;
     /** @var int */
     private $_slice = Contact::SLICE_MINIMAL;
     /** @var ?ContactSet */
@@ -364,7 +366,7 @@ class Conf {
 
     function load_settings() {
         $this->__load_settings();
-        if ($this->sversion < 311) {
+        if ($this->sversion < 312) {
             $old_nerrors = Dbl::$nerrors;
             while ((new UpdateSchema($this))->run()) {
                 usleep(50000);
@@ -2198,7 +2200,7 @@ class Conf {
 
     /** @param int $id */
     function prefetch_user_by_id($id) {
-        if (!array_key_exists($id, $this->_user_cache ?? [])) {
+        if ($id > 0 && !array_key_exists($id, $this->_user_cache ?? [])) {
             $this->_user_cache_missing[] = $id;
         }
     }
@@ -2207,7 +2209,7 @@ class Conf {
     function prefetch_users_by_id($ids) {
         $uc = $this->_user_cache ?? [];
         foreach ($ids as $id) {
-            if (!array_key_exists($id, $uc)) {
+            if ($id > 0 && !array_key_exists($id, $uc)) {
                 $this->_user_cache_missing[] = $id;
             }
         }
@@ -2215,7 +2217,7 @@ class Conf {
 
     /** @param string $email */
     function prefetch_user_by_email($email) {
-        if (!array_key_exists($email, $this->_user_email_cache ?? [])) {
+        if ($email !== "" && !array_key_exists($email, $this->_user_email_cache ?? [])) {
             $this->_user_cache_missing[] = $email;
         }
     }
@@ -2224,7 +2226,7 @@ class Conf {
     function prefetch_users_by_email($emails) {
         $uec = $this->_user_email_cache ?? [];
         foreach ($emails as $email) {
-            if (!array_key_exists($email, $uec)) {
+            if ($email !== "" && !array_key_exists($email, $uec)) {
                 $this->_user_cache_missing[] = $email;
             }
         }
@@ -2237,9 +2239,8 @@ class Conf {
             return $req;
         } else if (is_string($req) && $req !== "" && is_valid_utf8($req)) {
             return strtolower($req);
-        } else {
-            return null;
         }
+        return null;
     }
 
     /** @param bool $require_pc */
@@ -2249,15 +2250,13 @@ class Conf {
         foreach ($this->_user_cache_missing ?? [] as $req) {
             $req = self::clean_user_cache_request($req);
             if (is_int($req)) {
-                if ($req !== 0
-                    && !array_key_exists($req, $this->_user_cache)) {
+                if (!array_key_exists($req, $this->_user_cache)) {
                     $this->_user_cache[$req] = null;
                     $reqids[] = $req;
                 }
             } else if (is_string($req)) {
                 $this->_ensure_user_email_cache();
-                if ($req !== ""
-                    && !array_key_exists($req, $this->_user_email_cache)) {
+                if (!array_key_exists($req, $this->_user_email_cache)) {
                     $this->_user_email_cache[$req] = null;
                     $reqemails[] = $req;
                 }
@@ -2297,7 +2296,7 @@ class Conf {
      * @return ?Contact */
     function user_by_id($id, $sliced = 0) {
         $id = (int) $id;
-        if ($id === 0) {
+        if ($id <= 0) {
             return null;
         } else if (Contact::$main_user !== null
                    && Contact::$main_user->conf === $this
@@ -2443,6 +2442,27 @@ class Conf {
             // will rarely happen -- unslicing a user who has been deleted
             $u->_slice = 0;
         }
+    }
+
+    /** @param int $uid
+     * @return list<int> */
+    function linked_user_ids($uid) {
+        if ($this->_linked_user_cache === null) {
+            $this->_linked_user_cache = [];
+            $result = $this->qe("select contactId, primaryContactId from ContactPrimary");
+            while (($row = $result->fetch_row())) {
+                $cid = (int) $row[0];
+                $pcid = (int) $row[1];
+                if (!is_array($this->_linked_user_cache[$pcid] ?? null)) {
+                    $this->_linked_user_cache[$pcid] = [$pcid];
+                }
+                $this->_linked_user_cache[$pcid][] = $cid;
+                $this->_linked_user_cache[$cid] = $pcid;
+            }
+            $result->close();
+        }
+        $x = $this->_linked_user_cache[$uid] ?? [$uid];
+        return is_int($x) ? $this->_linked_user_cache[$x] : $x;
     }
 
 
@@ -3159,12 +3179,11 @@ class Conf {
         if ($n && $this->ql_ok("update Settings set value=? where name='allowPaperOption'", $n)) {
             $this->sversion = $this->settings["allowPaperOption"] = $n;
             return true;
-        } else {
-            return false;
         }
+        return false;
     }
 
-    /** @param array{all?:true,autosearch?:true,rf?:true,tags?:true,cdb?:true,pc?:true,users?:true,options?:true} $caches */
+    /** @param array{all?:true,autosearch?:true,rf?:true,tags?:true,cdb?:true,pc?:true,users?:true,options?:true,linked_users?:true} $caches */
     function invalidate_caches($caches) {
         if (self::$no_invalidate_caches) {
             return;
@@ -3181,6 +3200,9 @@ class Conf {
         if (isset($caches["cdb"])) {
             unset($this->opt["contactdbConfid"]);
             self::$_cdb = false;
+        }
+        if ($all || isset($caches["users"]) || isset($caches["linked_users"])) {
+            $this->_linked_user_cache = null;
         }
         // NB All setting-related caches cleared here should also be cleared
         // in refresh_settings().

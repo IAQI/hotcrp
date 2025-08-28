@@ -117,9 +117,8 @@ class MailRecipients extends MessageSet {
             }
         } else if ($t === "myuncextrev") {
             return "uncmyextrev";
-        } else {
-            return $t ?? "";
         }
+        return $t ?? "";
     }
 
     /** @return list<string> */
@@ -280,11 +279,11 @@ class MailRecipients extends MessageSet {
             && !preg_match('/\A(?:|n\/a|\(?all\)?|0)\z/i', $newrev_since)) {
             $t = $this->conf->parse_time($newrev_since);
             if ($t === false) {
-                $this->error_at("newrev_since", "Invalid date.");
+                $this->error_at("newrev_since", "Invalid date");
             } else {
                 $this->newrev_since = $t;
                 if ($t > Conf::$now) {
-                    $this->warning_at("newrev_since", "That time is in the future.");
+                    $this->warning_at("newrev_since", "That time is in the future");
                 }
             }
         } else {
@@ -374,15 +373,14 @@ class MailRecipients extends MessageSet {
             return 2;
         } else if ($this->is_authors() || $paper_sensitive) {
             return 1;
-        } else {
-            return 0;
         }
+        return 0;
     }
 
     /** @return string */
     function unparse() {
         $t = $this->rect->description;
-        if ($this->rect->name == "newpcrev" && $this->newrev_since) {
+        if ($this->rect->name === "newpcrev" && $this->newrev_since) {
             $t .= " since " . htmlspecialchars($this->conf->parseableTime($this->newrev_since, false));
         }
         return $t;
@@ -412,7 +410,7 @@ class MailRecipients extends MessageSet {
             $options["unsub"] = $options["active"] = true;
         } else if (in_array($t, ["dec:any", "dec:none", "dec:yes", "dec:no", "dec:maybe"], true)) {
             $options["finalized"] = $options[$t] = true;
-        } else if (substr($t, 0, 4) === "dec:") {
+        } else if (str_starts_with($t, "dec:")) {
             $options["finalized"] = true;
             $options["where"] = "false";
             foreach ($this->conf->decision_set() as $dec) {

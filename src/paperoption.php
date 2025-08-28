@@ -111,7 +111,10 @@ class PaperOption implements JsonSerializable {
     const VIS_ADMIN = 4;       // visible only to admins
     static private $visibility_map = ["all", "nonblind", "conflict", "review", "admin"];
 
-    /** @var array<string,class-string> */
+    /** @var array<string,class-string>
+     *
+     * This map is related to, and must be kept in sync with,
+     * etc/optiontypes.json. */
     static private $callback_map = [
         "separator" => "+Separator_PaperOption",
         "checkbox" => "+Checkbox_PaperOption",
@@ -266,18 +269,24 @@ class PaperOption implements JsonSerializable {
         Conf::xt_resolve_require($args);
         $fn = $args->function ?? null;
         if (!$fn) {
-            $fn = self::$callback_map[$args->type ?? ""] ?? null;
-        }
-        if (!$fn) {
-            $fn = "+Unknown_PaperOption";
+            if (isset($args->type)) {
+                $fn = self::$callback_map[$args->type] ?? null;
+                if (!$fn
+                    && ($ot = ($conf->option_type_map())[$args->type] ?? null)
+                    && isset($ot->function)) {
+                    $fn = $ot->function;
+                }
+            }
+            if (!$fn) {
+                $fn = "+Unknown_PaperOption";
+            }
         }
         if ($fn[0] === "+") {
             $class = substr($fn, 1);
             /** @phan-suppress-next-line PhanTypeExpectedObjectOrClassName */
             return new $class($conf, $args);
-        } else {
-            return call_user_func($fn, $conf, $args);
         }
+        return call_user_func($fn, $conf, $args);
     }
 
     /** @param PaperOption $a
@@ -667,12 +676,13 @@ class PaperOption implements JsonSerializable {
     function has_attachments() {
         return false;
     }
+
+    function value_force(PaperValue $ov) {
+    }
+
     /** @return bool */
     function is_value_present_trivial() {
         return !$this->include_empty;
-    }
-
-    function value_force(PaperValue $ov) {
     }
     /** @return bool */
     function value_present(PaperValue $ov) {
@@ -693,6 +703,16 @@ class PaperOption implements JsonSerializable {
         }
         return $av <=> $bv;
     }
+
+    /** @return list<int> */
+    function value_dids(PaperValue $ov) {
+        return [];
+    }
+    /** @return mixed */
+    function value_export_json(PaperValue $ov, PaperExport $pex) {
+        return null;
+    }
+
     /** @return bool */
     function value_check_required(PaperValue $ov) {
         if (!$this->test_required($ov->prow)
@@ -709,23 +729,19 @@ class PaperOption implements JsonSerializable {
         }
         return false;
     }
+    /** @return void */
     function value_check(PaperValue $ov, Contact $user) {
         $this->value_check_required($ov);
-    }
-    /** @return list<int> */
-    function value_dids(PaperValue $ov) {
-        return [];
-    }
-    /** @return mixed */
-    function value_export_json(PaperValue $ov, PaperExport $pex) {
-        return null;
     }
     /** @return void */
     function value_store(PaperValue $ov, PaperStatus $ps) {
     }
-    /** @return bool */
+    /** @return ?PaperValue */
+    function value_reconcile(PaperValue $ov, PaperStatus $ps) {
+        return null;
+    }
+    /** @return void */
     function value_save(PaperValue $ov, PaperStatus $ps) {
-        return false;
     }
 
     /** @param string $name
@@ -830,7 +846,14 @@ class PaperOption implements JsonSerializable {
     function parse_qreq(PaperInfo $prow, Qrequest $qreq) {
         return null;
     }
-    /** @return ?PaperValue */
+    /** @param mixed $j
+     * @return ?PaperValue
+     * @suppress PhanDeprecatedFunction */
+    function parse_json_user(PaperInfo $prow, $j, Contact $user) {
+        return $this->parse_json($prow, $j);
+    }
+    /** @return ?PaperValue
+     * @deprecated */
     function parse_json(PaperInfo $prow, $j) {
         return null;
     }
@@ -1106,12 +1129,11 @@ class Checkbox_PaperOption extends PaperOption {
         $x = (string) $qreq[$this->formid];
         return PaperValue::make($prow, $this, $x !== "" && $x !== "0" ? 1 : null);
     }
-    function parse_json(PaperInfo $prow, $j) {
+    function parse_json_user(PaperInfo $prow, $j, Contact $user) {
         if (is_bool($j) || $j === null) {
             return PaperValue::make($prow, $this, $j ? 1 : null);
-        } else {
-            return PaperValue::make_estop($prow, $this, "<0>Option should be ‘true’ or ‘false’");
         }
+        return PaperValue::make_estop($prow, $this, "<0>Option should be ‘true’ or ‘false’");
     }
     function print_web_edit(PaperTable $pt, $ov, $reqov) {
         $cb = Ht::checkbox($this->formid, 1, !!$reqov->value, [
@@ -1267,12 +1289,11 @@ class Selector_PaperOption extends PaperOption {
             return PaperValue::make($prow, $this, $iv);
         } else if (($idx = array_search($v, $this->values)) !== false) {
             return PaperValue::make($prow, $this, $idx + 1);
-        } else {
-            return PaperValue::make_estop($prow, $this, "<0>Value doesn’t match any of the options");
         }
+        return PaperValue::make_estop($prow, $this, "<0>Value doesn’t match any of the options");
     }
 
-    function parse_json(PaperInfo $prow, $j) {
+    function parse_json_user(PaperInfo $prow, $j, Contact $user) {
         $v = false;
         if ($j === null || $j === 0) {
             return PaperValue::make($prow, $this);
@@ -1283,9 +1304,8 @@ class Selector_PaperOption extends PaperOption {
         }
         if ($v !== false) {
             return PaperValue::make($prow, $this, $v + 1);
-        } else {
-            return PaperValue::make_estop($prow, $this, "<0>Value doesn’t match any of the options");
         }
+        return PaperValue::make_estop($prow, $this, "<0>Value doesn’t match any of the options");
     }
 
     function print_web_edit(PaperTable $pt, $ov, $reqov) {
@@ -1455,15 +1475,12 @@ class Document_PaperOption extends PaperOption {
         }
     }
     function value_save(PaperValue $ov, PaperStatus $ps) {
-        if ($this->id !== DTYPE_SUBMISSION && $this->id !== DTYPE_FINAL) {
-            return false;
+        if ($this->id === DTYPE_SUBMISSION || $this->id === DTYPE_FINAL) {
+            $key = $this->id ? "finalPaperStorageId" : "paperStorageId";
+            if ($ov->prow->$key !== ($ov->value ?? 0)) {
+                $ov->prow->set_prop($key, $ov->value ?? 0);
+            }
         }
-        $key = $this->id ? "finalPaperStorageId" : "paperStorageId";
-        if ($ov->prow->$key !== ($ov->value ?? 0)) {
-            $ps->change_at($this);
-            $ov->prow->set_prop($key, $ov->value ?? 0);
-        }
-        return true;
     }
 
     function parse_qreq(PaperInfo $prow, Qrequest $qreq) {
@@ -1483,7 +1500,7 @@ class Document_PaperOption extends PaperOption {
             return null;
         }
     }
-    function parse_json(PaperInfo $prow, $j) {
+    function parse_json_user(PaperInfo $prow, $j, Contact $user) {
         if ($j === false) {
             return PaperValue::make($prow, $this);
         } else if ($j === null) {
@@ -1495,9 +1512,8 @@ class Document_PaperOption extends PaperOption {
                 $ov->error("<5>" . $j->error_html);
             }
             return $ov;
-        } else {
-            return PaperValue::make_estop($prow, $this, "<0>Format error");
         }
+        return PaperValue::make_estop($prow, $this, "<0>Format error");
     }
     function print_web_edit(PaperTable $pt, $ov, $reqov) {
         if (($this->id === DTYPE_SUBMISSION || $this->id === DTYPE_FINAL)
@@ -1725,7 +1741,7 @@ class Text_PaperOption extends PaperOption {
     function parse_qreq(PaperInfo $prow, Qrequest $qreq) {
         return $this->parse_json_string($prow, $qreq[$this->formid] ?? "", PaperOption::PARSE_STRING_CONVERT);
     }
-    function parse_json(PaperInfo $prow, $j) {
+    function parse_json_user(PaperInfo $prow, $j, Contact $user) {
         return $this->parse_json_string($prow, $j);
     }
     function print_web_edit(PaperTable $pt, $ov, $reqov) {
@@ -1795,5 +1811,6 @@ class Unknown_PaperOption extends PaperOption {
     function __construct(Conf $conf, $args) {
         $args->type = "none";
         parent::__construct($conf, $args, "hidden");
+        $this->configurable = false;
     }
 }

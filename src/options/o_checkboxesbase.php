@@ -86,10 +86,6 @@ abstract class CheckboxesBase_PaperOption extends PaperOption {
     }
 
     function value_store(PaperValue $ov, PaperStatus $ps) {
-        $vs = $ov->value_list();
-        $this->topic_set()->sort($vs); // to reduce unnecessary diffs
-        $ov->set_value_data($vs, array_fill(0, count($vs), null));
-
         $badvs = $ov->anno("bad_values") ?? [];
         if (!empty($badvs)) {
             $ov->warning($ps->_("<0>Options {:list} not found", $badvs, new FmtArg("type", $this->type)));
@@ -115,7 +111,7 @@ abstract class CheckboxesBase_PaperOption extends PaperOption {
         return PaperValue::make_multi($prow, $this, $vs, array_fill(0, count($vs), null));
     }
 
-    function parse_json(PaperInfo $prow, $j) {
+    function parse_json_user(PaperInfo $prow, $j, Contact $user) {
         $bad = false;
         if (is_object($j) || (is_array($j) && !array_is_list($j))) {
             $j = array_keys(array_filter((array) $j, function ($x) use (&$bad) {

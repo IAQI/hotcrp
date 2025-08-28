@@ -53,7 +53,10 @@ class Options_SettingParser extends SettingParser {
     /** @param SettingValues $sv */
     function __construct($sv) {
         $this->conf = $sv->conf;
-        $this->pt = new PaperTable($sv->user, new Qrequest("GET"), PaperInfo::make_new($sv->user, null));
+        $prow = PaperInfo::make_new($sv->user, null);
+        $prow->set_prop("title", "Example paper");
+        $prow->set_prop("authorInformation", "Author\tOne\tauthor1@example.com\t\nAuthor\tTwo\tauthor2@example.com\t\n" . Author::make_user($sv->user)->unparse_tabbed());
+        $this->pt = new PaperTable($sv->user, new Qrequest("GET"), $prow);
         $this->pt->settings_mode = true;
         $this->_fcvts = new FieldConversions_Setting($sv->conf->option_type_map(), $sv->conf);
     }
@@ -195,9 +198,9 @@ class Options_SettingParser extends SettingParser {
     function prepare_oblist(Si $si, SettingValues $sv) {
         if ($si->name === "sf") {
             $sfss = [];
-            foreach (self::configurable_options($sv->conf) as $i => $opt) {
+            foreach (self::configurable_options($sv->conf) as $opt) {
                 $sfs = $opt->export_setting();
-                $sfs->order = $i + 1;
+                $sfs->order = count($sfss) + 1;
                 $sfss[] = $sfs;
             }
             $sv->append_oblist("sf", $sfss, "name");
@@ -524,7 +527,7 @@ class Options_SettingParser extends SettingParser {
 
         ob_start();
         $vopt = $this->make_sample_option($sampj, true);
-        $ov = $vopt->parse_json($this->pt->prow, $sampj->value ?? null)
+        $ov = $vopt->parse_json_user($this->pt->prow, $sampj->value ?? null, $this->pt->user)
             ?? PaperValue::make($this->pt->prow, $vopt);
         $vopt->print_web_edit($this->pt, $ov, $ov);
         $ret->sf_view_html = ob_get_clean();

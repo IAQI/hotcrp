@@ -2,7 +2,7 @@
 // paperstatus.php -- HotCRP helper for reading/storing papers as JSON
 // Copyright (c) 2008-2025 Eddie Kohler; see LICENSE.
 
-class PaperStatus extends MessageSet {
+final class PaperStatus extends MessageSet {
     /** @var Conf
      * @readonly */
     public $conf;
@@ -813,11 +813,11 @@ class PaperStatus extends MessageSet {
             assert($oj->prow === $this->prow);
             $ov = $oj;
         } else {
-            $ov = $opt->parse_json($this->prow, $oj);
+            $ov = $opt->parse_json_user($this->prow, $oj, $this->user);
         }
         if ($ov !== null) {
             $opt->value_check($ov, $this->user);
-            if (!$ov->has_error()) {
+            if ($ov->allow_store()) {
                 $opt->value_store($ov, $this);
                 $this->prow->override_option($ov);
             }
@@ -1357,13 +1357,32 @@ class PaperStatus extends MessageSet {
             return false;
         }
 
+        // reconcile fields
+        for ($round = 0; $round !== 10; ) {
+            $again = false;
+            foreach ($this->prow->form_fields() as $opt) {
+                $ov = $this->prow->force_option($opt);
+                if (($nov = $opt->value_reconcile($ov, $this))) {
+                    $opt->value_check($nov, $this->user);
+                    assert($nov->allow_store());
+                    $opt->value_store($nov, $this);
+                    $this->prow->override_option($nov);
+                    $again = true;
+                }
+            }
+            $round = $again ? $round + 1 : 10;
+        }
+
         // prepare fields for saving, mark changed fields
         foreach ($this->prow->overridden_option_ids() as $oid) {
             $ov = $this->prow->option($oid);
-            if (!$ov->has_error()
-                && !$ov->option->value_save($ov, $this)
-                && !$ov->equals($this->prow->base_option($oid))) {
-                $this->change_at($ov->option);
+            if ($ov->allow_store()) {
+                $ov->option->value_save($ov, $this);
+                if ($oid !== PaperOption::CONTACTSID
+                    && $oid !== PaperOption::PCCONFID
+                    && !$ov->equals($this->prow->base_option($oid))) {
+                    $this->change_at($ov->option);
+                }
             }
         }
 
@@ -1698,7 +1717,7 @@ class PaperStatus extends MessageSet {
         // maybe update `papersub` settings
         $was_submitted = $this->prow->base_prop("timeWithdrawn") <= 0
             && $this->prow->base_prop("timeSubmitted") > 0;
-        if ($this->_paper_submitted != $was_submitted) {
+        if ($this->_paper_submitted !== $was_submitted) {
             $this->conf->update_papersub_setting($this->_paper_submitted ? 1 : -1);
         }
 
@@ -1902,7 +1921,7 @@ class PaperStatus extends MessageSet {
         if ($sr->freeze) {
             $n[] = $this->conf->_("<0>This {submission} has not yet been completed.");
         } else if (($missing = PaperTable::missing_required_fields($prow))) {
-            $n[] = $this->conf->_("<5>This {submission} is not ready for review. Required fields {:list} are missing.", PaperTable::field_title_links($missing, "missing_title"));
+            $n[] = $this->conf->_("<5>This {submission} is not ready for review. Required fields {:list} are incomplete.", PaperTable::field_title_links($missing, "missing_title"));
         } else {
             $first = $this->conf->_("<5>This {submission} is marked as not ready for review.");
             $n[] = "<5><strong>" . Ftext::as(5, $first) . "</strong>";

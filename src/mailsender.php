@@ -47,9 +47,9 @@ class MailSender {
     /** @var array<int,true> */
     private $mrecipients = [];
     /** @var bool */
-    private $had_nonreceivable = false;
-    /** @var int */
-    private $cbcount = 0;
+    private $had_invalid_recipient = false;
+    /** @var bool */
+    private $had_invalid_mail = false;
 
     /** @param 0|1|2 $phase */
     function __construct(MailRecipients $recip, Qrequest $qreq, $phase) {
@@ -289,18 +289,15 @@ class MailSender {
             $ms = [];
             if (isset($this->qreq->body)
                 && $this->user->privChair
-                && (strpos($this->qreq->body, "%REVIEWS%")
-                    || strpos($this->qreq->body, "%COMMENTS%"))) {
-                if (!$this->conf->time_some_author_view_review()) {
-                    $ms[] = MessageItem::warning("<5>Although these mails contain reviews and/or comments, authors can’t see reviews or comments on the site. (<a href=\"" . $this->conf->hoturl("settings", "group=dec") . "\" class=\"nw\">Change this setting</a>)");
-                }
+                && preg_match('/(?:\{\{|%)(?:REVIEWS|COMMENTS)/', $this->qreq->body)
+                && !$this->conf->time_some_author_view_review()) {
+                $ms[] = MessageItem::warning("<5>Although these mails contain reviews and/or comments, authors can’t see reviews or comments on the site. (<a href=\"" . $this->conf->hoturl("settings", "group=dec") . "\" class=\"nw\">Change this setting</a>)");
             }
             if (isset($this->qreq->body)
                 && $this->user->privChair
-                && substr($this->recipients, 0, 4) == "dec:") {
-                if (!$this->conf->time_some_author_view_decision()) {
-                    $ms[] = MessageItem::warning("<5>You appear to be sending an acceptance or rejection notification, but authors can’t see paper decisions on the site. (<a href=\"" . $this->conf->hoturl("settings", "group=dec") . "\" class=\"nw\">Change this setting</a>)");
-                }
+                && substr($this->recipients, 0, 4) == "dec:"
+                && !$this->conf->time_some_author_view_decision()) {
+                $ms[] = MessageItem::warning("<5>You appear to be sending an acceptance or rejection notification, but authors can’t see paper decisions on the site. (<a href=\"" . $this->conf->hoturl("settings", "group=dec") . "\" class=\"nw\">Change this setting</a>)");
             }
             if (!empty($ms)) {
                 $this->conf->feedback_msg($ms);
@@ -315,12 +312,19 @@ class MailSender {
               '<div class="fx msg msg-info">',
                 '<p class="feedback is-note">',
                   'Verify that the mails look correct, then select “Send” to send the checked mails.<br>',
-                  "Mailing to:&nbsp;", $this->recip->unparse(),
+                  "Mailing to: ", $this->recip->unparse(),
                   '<span id="mailinfo"></span>';
             if (!preg_match('/\A(?:pc\z|pc:|all\z)/', $this->recipients)
                 && $this->qreq->plimit
                 && (string) $this->qreq->q !== "") {
-                echo "<br>Paper selection:&nbsp;", htmlspecialchars($this->qreq->q);
+                assert($this->recip->has_paper_ids());
+                echo "<br>Paper selection: ";
+                if (preg_match('/\A(?:pidcode:\S+|[\d ]+)\z/', $this->qreq->q)) {
+                    echo join(" ", $this->recip->paper_ids());
+                } else {
+                    echo "‘", htmlspecialchars($this->qreq->q), "’ (",
+                        join(" ", $this->recip->paper_ids()), ")";
+                }
             }
             echo '</p>',
               '</div>';
@@ -350,8 +354,8 @@ class MailSender {
             $s .= min(round(100 * $nrows_done / max(1, $nrows_total)), 99);
         }
         $s .= "% done\";";
-        $m = plural($this->mcount, "mail") . ", "
-            . plural($this->mrecipients, $this->had_nonreceivable ? "valid recipient" : "recipient");
+        $m = plural($this->mcount, $this->had_invalid_mail ? "sendable mail" : "mail") . ", "
+            . plural($this->mrecipients, $this->had_invalid_recipient ? "valid recipient" : "recipient");
         $s .= "document.getElementById('mailinfo').innerHTML=\"<span class='barsep'>·</span>" . $m . "\";";
         if (!$this->sending && $this->groupable) {
             $s .= "\$('#mail-group-disabled').addClass('hidden');\$('#mail-group-enabled').removeClass('hidden')";
@@ -441,7 +445,7 @@ class MailSender {
             echo ' mail-preview-send uimd ui js-click-child d-flex"><div class="pr-2">',
                 Ht::checkbox("", self::prepid($prep), true, [
                     "class" => "uic js-range-click js-mail-preview-choose",
-                    "data-range-type" => "mhcb", "id" => "psel{$this->cbcount}"
+                    "data-range-type" => "mhcb",
                 ]), '</div><div class="flex-grow-0">';
         } else {
             echo ' mail-preview-send">';
@@ -490,17 +494,25 @@ class MailSender {
             $prep->send();
         }
 
-        ++$this->mcount;
+        $any_receivers = false;
         foreach ($prep->recipients() as $recip) {
             if (!$recip->can_receive_mail($prep->self_requested())) {
-                $this->had_nonreceivable = true;
-            } else if ($recip->conf === $prep->conf) {
+                $this->had_invalid_recipient = true;
+                continue;
+            }
+            $any_receivers = true;
+            if ($recip->conf === $prep->conf) {
                 $this->mrecipients[$recip->contactId] = true;
                 if ($this->sending) {
                     // Log format matters
                     $this->conf->log_for($this->user, $recip, "Sent mail #{$this->mailid}", $prep->paperId);
                 }
             }
+        }
+        if ($any_receivers) {
+            ++$this->mcount;
+        } else {
+            $this->had_invalid_mail = true;
         }
 
         $this->print_prep($prep);
@@ -528,7 +540,7 @@ class MailSender {
         // test whether this mail is paper-sensitive
         $mailer = new HotCRPMailer($this->conf, $this->user, $rest);
         $prep = $mailer->prepare($template, $rest);
-        $paper_sensitive = preg_match('/%[A-Z0-9]+[(%]/', $prep->subject . $prep->body);
+        $paper_sensitive = preg_match('/(?:\{\{|%)[A-Z0-9]+[(}]/', $prep->subject . $prep->body);
 
         $q = $this->recip->query($paper_sensitive);
         if (!$q) {

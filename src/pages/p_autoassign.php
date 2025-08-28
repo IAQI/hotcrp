@@ -312,7 +312,7 @@ class Autoassign_Page {
         $this->print_header();
         echo Ht::form($conf->hoturl("=autoassign", ["profile" => $qreq->profile, "seed" => $qreq->seed, "XDEBUG_PROFILE" => $qreq->XDEBUG_PROFILE]), [
                 "id" => "autoassignform",
-                "class" => "need-diff-check ui-submit js-autoassign-prepare"
+                "class" => "need-diff-check ui-submit js-autoassign-prepare js-selector-summary"
             ]),
             '<div class="helpside"><div class="helpinside">
         Assignment methods:
@@ -612,7 +612,7 @@ class Autoassign_Page {
         $status = $tok->data("status");
         if ($status === "done" && ($ipid = $tok->data("incomplete_pids"))) {
             sort($ipid);
-            $q = count($ipid) > 50 ? "pidcode:" . SessionList::encode_ids($ipid) : join(" ", $ipid);
+            $q = PaperSearch::encode_id_search($ipid);
             $this->ms->warning_at(null, "<0>This assignment is incomplete!");
             $this->ms->inform_at(null, $this->conf->_("<5><a href=\"{url}\">{Submissions} {pids:numlist#}</a> got fewer assignments than you requested.", new FmtArg("url", $this->conf->hoturl_raw("search", ["q" => $q]), 0), new FmtArg("pids", $ipid)));
             if (strpos($this->qreq->a, "review") !== false) {
@@ -727,7 +727,8 @@ class Autoassign_Page {
         if (strlen($apids) > 512) {
             $apids = substr($apids, 0, 509) . "...";
         }
-        echo Ht::form($this->conf->hoturl("=autoassign", $this->qreq_parameters(["assignpids" => $apids]))),
+        echo Ht::form($this->conf->hoturl("=autoassign", $this->qreq_parameters(["assignpids" => $apids])),
+            ["class" => "ui-submit js-selector-summary"]),
             Ht::hidden("saveassignment", 1);
 
         $atype = $aset->type_description();

@@ -1141,9 +1141,8 @@ class PaperInfo {
     function want_submitted() {
         if (($this->_flags & self::IS_UPDATING) !== 0) {
             return ($this->_flags & self::UPDATING_WANT_SUBMITTED) !== 0;
-        } else {
-            return $this->timeSubmitted > 0;
         }
+        return $this->timeSubmitted > 0;
     }
 
     /** @return 0|1 */
@@ -1345,17 +1344,6 @@ class PaperInfo {
         return $au;
     }
 
-    /** @param list<Author> $aulist
-     * @param string $email
-     * @return ?Author */
-    static function search_author_list_by_email($aulist, $email) {
-        foreach ($aulist as $au) {
-            if ($au->email !== "" && strcasecmp($au->email, $email) === 0)
-                return $au;
-        }
-        return null;
-    }
-
     /** @return list<Author> */
     function author_list() {
         if (!isset($this->_author_array)) {
@@ -1367,7 +1355,7 @@ class PaperInfo {
     /** @param string $email
      * @return ?Author */
     function author_by_email($email) {
-        return self::search_author_list_by_email($this->author_list(), $email);
+        return Author::find_by_email($email, $this->author_list());
     }
 
     /** @param int $index
@@ -2398,7 +2386,7 @@ class PaperInfo {
                    && $this->optionIds !== null
                    && !$need_data) {
             $this->_option_values = [];
-            preg_match_all('/(\d+)#(-?\d+)/', $this->optionIds, $m);
+            preg_match_all('/(\d+)\#(-?\d+)/', $this->optionIds, $m);
             for ($i = 0; $i < count($m[1]); ++$i) {
                 $this->_option_values[(int) $m[1][$i]][] = (int) $m[2][$i];
             }
@@ -2468,9 +2456,8 @@ class PaperInfo {
             return $ov;
         } else if (($opt = is_int($o) ? $this->conf->option_by_id($o) : $o)) {
             return PaperValue::make_force($this, $opt);
-        } else {
-            return null;
         }
+        return null;
     }
 
     /** @param int|PaperOption $o

@@ -83,6 +83,7 @@ class ContactPrimary {
         }
         $this->sec->save_prop();
         $this->conf->release_logs();
+        $this->conf->invalidate_caches(["linked_users" => true]);
         // authorship changes
         if (!$this->cdb) {
             $this->_update_author_records();
@@ -105,9 +106,8 @@ class ContactPrimary {
             return $this->pri;
         } else if ($this->cdb) {
             return $this->conf->cdb_user_by_id($id);
-        } else {
-            return $this->conf->user_by_id($id);
         }
+        return $this->conf->user_by_id($id);
     }
 
     private function _remove_old_primary(Contact $u) {
