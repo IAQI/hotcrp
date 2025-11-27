@@ -1,6 +1,6 @@
 <?php
 // settings/s_sround.php -- HotCRP settings > submission rounds page
-// Copyright (c) 2006-2023 Eddie Kohler; see LICENSE.
+// Copyright (c) 2006-2025 Eddie Kohler; see LICENSE.
 
 class Sround_Setting {
     // used by ReviewForm constructor
@@ -8,6 +8,8 @@ class Sround_Setting {
     public $id;
     /** @var string */
     public $tag;
+    /** @var string */
+    public $label;
     /** @var int */
     public $open;
     public $register;
@@ -20,6 +22,7 @@ class Sround_Setting {
     static function make_json($jx) {
         $sr = new Sround_Setting;
         $sr->id = $sr->tag = $jx->tag;
+        $sr->label = $jx->label ?? $jx->tag;
         $sr->open = $jx->open ?? 0;
         $sr->register = $jx->register ?? 0;
         $sr->submit = $jx->submit ?? 0;
@@ -30,6 +33,9 @@ class Sround_Setting {
 
     function export_json() {
         $j = ["tag" => $this->tag];
+        if ($this->label !== null && $this->label !== $this->tag) {
+            $j["label"] = $this->label;
+        }
         if ($this->open > 0) {
             $j["open"] = $this->open;
         }
@@ -52,15 +58,6 @@ class Sround_Setting {
 
 class Sround_SettingParser extends SettingParser {
     private $round_transform = [];
-
-    function placeholder(Si $si, SettingValues $sv) {
-        if ($si->name0 === "submission/" && $si->name2 === "/name") {
-            $idv = $sv->vstr("submission/{$si->name1}/id");
-            return ctype_digit($idv) && $idv !== "0" ? "unnamed" : "(new round)";
-        } else {
-            return null;
-        }
-    }
 
     function set_oldv(Si $si, SettingValues $sv) {
         if ($si->name0 === "submission/" && $si->name2 === "") {
@@ -112,6 +109,7 @@ class Sround_SettingParser extends SettingParser {
 
         // deadlines
         echo "<div id=\"submission/{$ctr}/edit\"><div class=\"flex-grow-0\">";
+        $sv->print_entry_group("submission/{$ctr}/label", "Title", ["horizontal" => true, "group_class" => "medium", "class" => "uii js-settings-submission-round-label"]);
         $sv->print_entry_group("submission/{$ctr}/registration", "Registration deadline", ["horizontal" => true, "group_class" => "medium"]);
         $sv->print_entry_group("submission/{$ctr}/done", "Submission deadline", ["horizontal" => true, "group_class" => "medium"]);
         echo '</div></div></fieldset>';
@@ -139,8 +137,10 @@ class Sround_SettingParser extends SettingParser {
 
     function apply_req(Si $si, SettingValues $sv) {
         if ($si->name === "submission") {
-            return $this->apply_submission_req($si, $sv);
-        } else if ($si->name2 === "/tag") {
+            $this->apply_submission_req($si, $sv);
+            return true;
+        }
+        if ($si->name2 === "/tag") {
             if (($n = $sv->base_parse_req($si)) !== null
                 && $n !== $sv->oldv($si)) {
                 if (($err = Conf::round_name_error($n))) {
@@ -148,9 +148,8 @@ class Sround_SettingParser extends SettingParser {
                 }
             }
             return false;
-        } else {
-            return false;
         }
+        return false;
     }
 
     private function apply_submission_req(Si $si, SettingValues $sv) {
@@ -167,6 +166,7 @@ class Sround_SettingParser extends SettingParser {
         // having parsed all names, check for duplicates
         foreach ($sv->oblist_keys("submission") as $ctr) {
             $sv->error_if_duplicate_member("submission", $ctr, "tag", "Submission class name");
+            $sv->error_if_duplicate_member("submission", $ctr, "label", "Submission class label");
         }
 
         // save
@@ -175,21 +175,30 @@ class Sround_SettingParser extends SettingParser {
             $srj[] = $sr->export_json();
         }
         if ($sv->update("submission_rounds", empty($srj) ? "" : json_encode_db($srj))) {
+            // XXX Automatic tags have weird interactions with submission rounds
+            $sv->request_read_lock("Paper");
+            $sv->request_write_lock("PaperTag");
+            $sv->request_write_lock("PaperTagAnno");
             $sv->request_store_value($si);
         }
-        return true;
     }
 
-    static function crosscheck(SettingValues $sv) {
-        if ($sv->has_interest("submission") || $sv->has_interest("tag_readonly")) {
-            foreach ($sv->conf->submission_round_list() as $i => $sr) {
-                if (!$sr->unnamed
-                    && !$sv->conf->tags()->is_readonly($sr->tag)) {
-                    $ctr = $i + 1;
-                    $sv->warning_at("submission/{$ctr}/tag", "<5>PC members can change the tag ‘" . htmlspecialchars($sr->tag) . "’. Tags used for submission classes should usually be " . $sv->setting_link("read-only", "tag_readonly") . ".");
-                    $sv->warning_at("tag_readonly");
-                }
+    function store_value(Si $si, SettingValues $sv) {
+        $assignments = "";
+        foreach ($sv->oblist_nondeleted_keys("submission") as $ctr) {
+            $sr = $sv->newv("submission/{$ctr}");
+            if ($sr->id
+                && $sr->tag !== $sr->id
+                && !$sv->conf->tags()->is_automatic($sr->tag)) {
+                $assignments .= "renametag,ALL,{$sr->id},{$sr->tag},new\n";
             }
+        }
+        if ($assignments !== "") {
+            $aset = new AssignmentSet($sv->conf->root_user());
+            $aset->set_override_conflicts(true);
+            $aset->set_search_type("all");
+            $aset->parse("action,paper,tag,new_tag,tag_value\n" . $assignments);
+            $aset->execute();
         }
     }
 }

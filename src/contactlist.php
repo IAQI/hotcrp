@@ -44,8 +44,8 @@ class ContactList {
     private $sortable;
     /** @var int */
     private $count;
-    /** @var object */
-    public $any;
+    /** @var int */
+    private $has_flags = 0;
     /** @var Tagger */
     private $tagger;
     private $limit;
@@ -92,6 +92,10 @@ class ContactList {
 
     /** @var ?array<string,int> */
     static private $field_name_map;
+
+    const HAS_SELECTOR = 1;
+    const HAS_PC = 2;
+    const HAS_NONPC = 4;
 
     function __construct(Contact $user, $sortable = true, $qreq = null) {
         $this->conf = $user->conf;
@@ -862,7 +866,7 @@ class ContactList {
                 return $this->conf->unparse_time_obscure($row->activity_at);
             }
         case self::FIELD_SELECTOR:
-            $this->any->sel = true;
+            $this->has_flags |= self::HAS_SELECTOR;
             $c = "";
             if ($this->_select_all
                 || ($this->_selection && $this->_selection->is_selected($row->contactId))) {
@@ -1066,25 +1070,28 @@ class ContactList {
     }
 
     function footer($ncol, $hascolors) {
-        if ($this->count == 0)
+        if ($this->count === 0) {
             return "";
-        $lllgroups = [];
+        }
+        $plfts = [];
 
         // Begin linelinks
+        $plft = PaperList::make_tab("get", "Download");
         $types = ["nameemail" => "Names and emails"];
         if ($this->user->privChair) {
             $types["pcinfo"] = "PC info";
         }
-        $lllgroups[] = ["", "Download",
-            Ht::select("getfn", $types, null, ["class" => "want-focus"])
-            . Ht::submit("fn", "Go", ["value" => "get", "class" => "uic js-submit-list ml-2 can-submit-all"])];
+        $plft->content = Ht::select("getfn", $types, null, ["class" => "want-focus"])
+            . Ht::submit("fn", "Go", ["value" => "get", "class" => "uic js-submit-list ml-2 can-submit-all"]);
+        $plfts[] = $plft;
 
         if ($this->user->privChair) {
-            $lllgroups[] = ["", "Tag",
-                Ht::select("tagfn", ["a" => "Add", "d" => "Remove", "s" => "Define"], $this->qreq->tagfn)
+            $plft = PaperList::make_tab("tag", "Tag");
+            $plft->content =Ht::select("tagfn", ["a" => "Add", "d" => "Remove", "s" => "Define"], $this->qreq->tagfn)
                 . ' &nbsp;tag(s) &nbsp;'
                 . Ht::entry("tag", $this->qreq->tag, ["size" => 15, "class" => "want-focus js-autosubmit", "data-submit-fn" => "tag"])
-                . Ht::submit("fn", "Go", ["value" => "tag", "class" => "uic js-submit-list ml-2"])];
+                . Ht::submit("fn", "Go", ["value" => "tag", "class" => "uic js-submit-list ml-2"]);
+            $plfts[] = $plft;
 
             $mods = [
                 "disableaccount" => "Disable",
@@ -1094,15 +1101,23 @@ class ContactList {
                 $mods["resetpassword"] = "Reset password";
             }
             $mods["sendaccount"] = "Send account information";
-            $lllgroups[] = ["", "Modify",
-                Ht::select("modifyfn", $mods, null, ["class" => "want-focus"])
-                . Ht::submit("fn", "Go", ["value" => "modify", "class" => "uic js-submit-list ml-2"])];
+            $mods[] = null;
+            if ($this->has("nonpc")) {
+                $mods["add_pc"] = "Add to PC";
+            }
+            if ($this->has("pc")) {
+                $mods["remove_pc"] = "Remove from PC";
+            }
+            $plft = PaperList::make_tab("modify", "Modify");
+            $plft->content = Ht::select("modifyfn", $mods, null, ["class" => "want-focus"])
+                . Ht::submit("fn", "Go", ["value" => "modify", "class" => "uic js-submit-list ml-2"]);
+            $plfts[] = $plft;
         }
 
         return "  <tfoot class=\"pltable-tfoot" . ($hascolors ? " pltable-colored" : "")
             . "\">" . PaperList::render_footer_row(1, $ncol - 1,
                 "<b>Select people</b> (or <a class=\"ui js-select-all\" href=\"\">select all {$this->count}</a>), then&nbsp; ",
-                $lllgroups)
+                $plfts)
             . "</tfoot>\n";
     }
 
@@ -1126,15 +1141,18 @@ class ContactList {
         } else if ($this->_limit_cids !== null) {
             $mainwhere[] = "contactId" . sql_in_int_list(array_keys($this->_limit_cids));
         }
-        $mainwhere[] = "(cflags&" . Contact::CF_PLACEHOLDER . ")=0";
+        $mainwhere[] = "(cflags&" . Contact::CFM_PLACEHOLDER . ")=0";
 
         // make query
         $result = $this->conf->qe_raw("select * from ContactInfo" . (empty($mainwhere) ? "" : " where " . join(" and ", $mainwhere)));
         $rows = [];
         while (($row = Contact::fetch($result, $this->conf))) {
-            if (!$row->is_anonymous_user() && !$row->is_placeholder()) {
-                $rows[] = $row;
+            if ($row->is_anonymous_user()
+                || $row->is_placeholder()
+                || $row->is_deleted()) {
+                continue;
             }
+            $rows[] = $row;
         }
         Dbl::free($result);
         if (isset($this->qopt["topics"])) {
@@ -1177,7 +1195,7 @@ class ContactList {
         $fieldDef = [];
         $acceptable_fields = [];
         $uldisplay = self::uldisplay($this->qreq);
-        $this->any = (object) ["sel" => false];
+        $this->has_flags = 0;
         $ncol = 0;
         foreach ($columns as $col) {
             if ($this->column_visible($col)
@@ -1252,6 +1270,11 @@ class ContactList {
             }
             $this->count++;
             $ids[] = (int) $row->contactId;
+            if ($row->roles & Contact::ROLE_PC) {
+                $this->has_flags |= self::HAS_PC;
+            } else {
+                $this->has_flags |= self::HAS_NONPC;
+            }
 
             // First create the expanded callout row
             $tt = "";
@@ -1418,5 +1441,18 @@ class ContactList {
 
         // run query
         return $this->_rows();
+    }
+
+    /** @param string $field
+     * @return bool */
+    function has($field) {
+        if ($field === "sel") {
+            return ($this->has_flags & self::HAS_SELECTOR) !== 0;
+        } else if ($field === "pc") {
+            return ($this->has_flags & self::HAS_PC) !== 0;
+        } else if ($field === "nonpc") {
+            return ($this->has_flags & self::HAS_NONPC) !== 0;
+        }
+        return false;
     }
 }

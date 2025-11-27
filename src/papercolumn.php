@@ -13,10 +13,12 @@ class PaperColumn extends Column {
     /** @var int */
     public $override = 0;
 
+    /** @deprecated */
     const PREP_CHECK = 0;
+    /** @deprecated */
     const PREP_SORT = 1;
+    /** @deprecated */
     const PREP_VISIBLE = 2;
-    const PREP_TEXT = 4;
 
     /** @param object $cj */
     function __construct(Conf $conf, $cj) {
@@ -98,20 +100,12 @@ class PaperColumn extends Column {
         $t = $this->title ?? "<{$this->name}>";
         return $is_text ? $t : htmlspecialchars($t);
     }
-    /** @return ?string */
-    function completion_name() {
-        if (!$this->completion) {
-            return null;
-        } else if (is_string($this->completion)) {
-            return $this->completion;
-        }
-        return $this->name;
-    }
     /** @return string */
     function sort_name() {
         return $this->name;
     }
-    /** @return string ...$keys */
+    /** @param string ...$keys
+     * @return string */
     final function sort_name_with_options(...$keys) {
         $a = [$this->name];
         foreach ($keys as $k) {
@@ -129,7 +123,7 @@ class PaperColumn extends Column {
 
     /** @return list<string> */
     static function user_view_option_schema() {
-        return ["format=given_name,first|family_name,last"];
+        return ["format=given_name,first|family_name,last^"];
     }
     /** @return int */
     function user_view_option_name_flags(Conf $conf) {
@@ -345,11 +339,10 @@ class Status_PaperColumn extends PaperColumn {
     }
     function content(PaperList $pl, PaperInfo $row) {
         list($class, $name) = $row->status_class_and_name($pl->user);
-        if ($this->show_submitted || $class !== "ps-submitted") {
-            return "<span class=\"pstat {$class}\">" . htmlspecialchars($name) . "</span>";
-        } else {
+        if (!$this->show_submitted && $class === "ps-submitted") {
             return "";
         }
+        return "<span class=\"pstat {$class}\">" . htmlspecialchars($name) . "</span>";
     }
     function text(PaperList $pl, PaperInfo $row) {
         list($class, $name) = $row->status_class_and_name($pl->user);
@@ -417,9 +410,8 @@ class ReviewStatus_PaperColumn extends PaperColumn {
         }
         if ($is_text) {
             return "# {$round_name}Reviews";
-        } else {
-            return '<span class="need-tooltip" aria-label="# completed reviews / # assigned reviews" data-tooltip-anchor="s">#&nbsp;' . $round_name . 'Reviews</span>';
         }
+        return '<span class="need-tooltip" aria-label="# completed reviews / # assigned reviews" data-tooltip-anchor="s">#&nbsp;' . $round_name . 'Reviews</span>';
     }
     function content_empty(PaperList $pl, PaperInfo $row) {
         return !$pl->user->can_view_review_assignment($row, null);
@@ -726,9 +718,8 @@ class ReviewerType_PaperColumn extends PaperColumn {
             return "Review";
         } else if ($is_text) {
             return $pl->user->reviewer_text_for($this->contact) . " review";
-        } else {
-            return $pl->user->reviewer_html_for($this->contact) . "<br>review";
         }
+        return $pl->user->reviewer_html_for($this->contact) . "<br>review";
     }
     function content(PaperList $pl, PaperInfo $row) {
         list($ranal, $flags) = $this->analysis($pl, $row);
@@ -779,10 +770,9 @@ class ReviewerType_PaperColumn extends PaperColumn {
 
 class TagList_PaperColumn extends PaperColumn {
     private $editable;
-    function __construct(Conf $conf, $cj, $editable = false) {
+    function __construct(Conf $conf, $cj) {
         parent::__construct($conf, $cj);
         $this->override = PaperColumn::OVERRIDE_FORCE;
-        $this->editable = $editable;
     }
     function view_option_schema() {
         return ["edit"];
@@ -791,11 +781,9 @@ class TagList_PaperColumn extends PaperColumn {
         if (!$pl->user->can_view_tags(null)) {
             return false;
         }
-        if ($visible) {
-            $pl->qopts["tags"] = 1;
-        }
+        $pl->qopts["tags"] = 1;
         $this->editable = $this->view_option("edit") ?? false;
-        if ($visible && $this->editable) {
+        if ($this->editable) {
             $pl->has_editable_tags = true;
         }
         return true;
@@ -850,8 +838,7 @@ abstract class ScoreGraph_PaperColumn extends PaperColumn {
         if (($v = $this->view_option("scoresort")) !== null) {
             $this->score_sort = ScoreInfo::parse_score_sort($v);
         }
-        if ($visible
-            && $this->cid !== $pl->user->contactId
+        if ($this->cid !== $pl->user->contactId
             && (!$pl->user->privChair || $pl->conf->has_any_manager())) {
             $pl->qopts["reviewSignatures"] = true;
         }
@@ -904,7 +891,7 @@ class Score_PaperColumn extends ScoreGraph_PaperColumn {
         if ($this->format_field->view_score <= $bound) {
             return false;
         }
-        if ($visible && !in_array($this->format_field, $pl->qopts["scores"] ?? [], true)) {
+        if (!in_array($this->format_field, $pl->qopts["scores"] ?? [], true)) {
             $pl->qopts["scores"][] = $this->format_field;
         }
         $this->any_review = !!$this->view_option("anyre");
@@ -963,21 +950,17 @@ class Score_PaperColumn extends ScoreGraph_PaperColumn {
             return (object) $cj;
         }, self::user_viewable_fields($name, $xtp->user));
     }
-    static function completions(Contact $user, $fxt) {
+    static function examples(Contact $user, $xfj) {
         if (!$user->can_view_some_review()) {
             return [];
         }
-        $vsbound = $user->permissive_view_score_bound();
-        $cs = array_map(function ($f) {
-            return $f->search_keyword();
-        }, array_filter($user->conf->all_review_fields(), function ($f) use ($vsbound) {
-            return $f instanceof Discrete_ReviewField
-                && $f->order > 0
-                && $f->view_score > $vsbound;
-        }));
-        if (!empty($cs)) {
-            array_unshift($cs, "scores");
+        $exs = [];
+        foreach (self::user_viewable_fields("scores", $user) as $f) {
+            $exs[] = new SearchExample($f->search_keyword(), "<0>Graph of " . $f->name . " scores");
         }
-        return $cs;
+        if (!empty($exs)) {
+            $exs[] = new SearchExample("scores", "<0>All score graphs");
+        }
+        return $exs;
     }
 }

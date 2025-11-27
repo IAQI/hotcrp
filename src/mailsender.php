@@ -208,7 +208,7 @@ class MailSender {
             Ht::hidden("send", 1),
             Ht::submit("Send mail", ["class" => "btn-highlight"]),
             "</form>",
-            Ht::unstash_script('$("#mailform").submit()');
+            Ht::unstash_script('$("#f-mail").submit()');
         $qreq->print_footer();
         throw new PageCompletion;
     }
@@ -240,7 +240,7 @@ class MailSender {
 
     private function print_request_form() {
         echo Ht::form($this->conf->hoturl("=mail"), [
-            "id" => "mailform",
+            "id" => "f-mail",
             "class" => $this->phase < 2 ? "ui-submit js-mail-send-phase-{$this->phase}" : null
         ]);
         foreach ($this->qreq->subset_as_array("to", "subject", "body", "cc", "reply-to", "q", "t", "plimit", "has_plimit", "newrev_since", "template") as $k => $v) {
@@ -527,15 +527,14 @@ class MailSender {
         $subject = "[{$this->conf->short_name}] $subject";
         $body = $this->qreq->body;
         $template = ["subject" => $subject, "body" => $body];
+        $is_authors = $this->recip->is_authors();
         $rest = [
             "requester_contact" => $this->user,
             "cc" => $this->qreq->cc,
             "reply-to" => $this->qreq["reply-to"],
-            "no_error_quit" => true
+            "no_error_quit" => true,
+            "author_permission" => $is_authors
         ];
-        if ($this->recip->is_authors()) {
-            $rest["author_permission"] = true;
-        }
 
         // test whether this mail is paper-sensitive
         $mailer = new HotCRPMailer($this->conf, $this->user, $rest);
@@ -572,13 +571,32 @@ class MailSender {
         $nwarnings = 0;
         $has_decoration = false;
         $revinform = ($this->recipients === "newpcrev" ? [] : null);
+        $last_pid = null;
+        $pid_index = null;
 
-        foreach ($recip_set as $contact) {
+        foreach ($recip_set as $index => $user) {
             ++$nrows_done;
+            $pid = (int) $user->paperId;
+            if ($pid !== $last_pid) {
+                $last_pid = $pid;
+                $pid_index = $index;
+            }
 
-            $rest["prow"] = $prow = $this->recip->paper((int) $contact->paperId);
+            // if sending to authors, skip secondaries
+            if ($is_authors && $pid > 0 && $user->primaryContactId > 0) {
+                $i = $pid_index;
+                while (($u = $recip_set->user_by_index($i))
+                       && $u->paperId == $pid) {
+                    if ($u->contactId === $user->primaryContactId) {
+                        continue 2;
+                    }
+                    ++$i;
+                }
+            }
+
+            $rest["prow"] = $prow = $this->recip->paper($pid);
             $rest["newrev_since"] = $this->recip->newrev_since;
-            $mailer->reset($contact, $rest);
+            $mailer->reset($user, $rest);
             $prep = $mailer->prepare($template, $rest);
 
             foreach ($prep->message_list() as $mi) {
@@ -589,12 +607,12 @@ class MailSender {
                 }
             }
 
-            if (!$prep->has_error() && $this->process_prep($prep, $last_prep, $contact)) {
+            if (!$prep->has_error() && $this->process_prep($prep, $last_prep, $user)) {
                 if ((!$this->user->privChair || $this->conf->opt("chairHidePasswords"))
                     && !$last_prep->censored_preparation
                     && $rest["censor"] === Mailer::CENSOR_NONE) {
                     $rest["censor"] = Mailer::CENSOR_DISPLAY;
-                    $mailer->reset($contact, $rest);
+                    $mailer->reset($user, $rest);
                     $last_prep->censored_preparation = $mailer->prepare($template, $rest);
                     $rest["censor"] = Mailer::CENSOR_NONE;
                 }
@@ -613,7 +631,7 @@ class MailSender {
             }
 
             if ($this->sending && $revinform !== null && $prow) {
-                $revinform[] = "(paperId={$prow->paperId} and contactId={$contact->contactId})";
+                $revinform[] = "(paperId={$prow->paperId} and contactId={$user->contactId})";
             }
         }
 
@@ -628,7 +646,7 @@ class MailSender {
             }
             $this->recip->append_list($mailer->message_list());
             $this->conf->feedback_msg($this->recip->decorated_message_list());
-            echo Ht::unstash_script("\$(\"#foldmail\").addClass('hidden');document.getElementById('mailform').action=" . json_encode_browser($this->conf->hoturl_raw("mail", "check=1", Conf::HOTURL_POST)));
+            echo Ht::unstash_script("\$(\"#foldmail\").addClass('hidden');document.getElementById('f-mail').action=" . json_encode_browser($this->conf->hoturl_raw("mail", "check=1", Conf::HOTURL_POST)));
             return;
         }
 

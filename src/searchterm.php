@@ -1094,9 +1094,8 @@ class Limit_SearchTerm extends SearchTerm {
         } else if (str_starts_with($limit, "dec:")
                    && count($conf->decision_set()->matchexpr(substr($limit, 4), true)) > 0) {
             return [$limit, $limit];
-        } else {
-            return null;
         }
+        return null;
     }
 
     /** @param string $limit
@@ -1126,12 +1125,14 @@ class Limit_SearchTerm extends SearchTerm {
         } else if (in_array($limit, ["a", "ar", "r", "req", "viewable", "reviewable",
                                      "all", "none"], true)) {
             $this->lflag = 0;
+        } else if ($limit === "accepted") {
+            $this->lflag = self::LFLAG_SUBMITTED | self::LFLAG_ACCEPTED;
+        } else if ($limit === "undecided") {
+            $this->lflag = self::LFLAG_SUBMITTED;
         } else if (in_array($limit, ["active", "unsub", "actadmin"], true)
                    || ($conf->can_pc_view_some_incomplete()
                        && !in_array($limit, ["s", "accepted"], true))) {
             $this->lflag = self::LFLAG_ACTIVE;
-        } else if ($limit === "accepted") {
-            $this->lflag = self::LFLAG_SUBMITTED | self::LFLAG_ACCEPTED;
         } else {
             $this->lflag = self::LFLAG_SUBMITTED;
         }
@@ -1184,12 +1185,11 @@ class Limit_SearchTerm extends SearchTerm {
             return $this->user->can_view_all_incomplete()
                 && $this->user->can_view_all_decision();
         case "reviewable":
-            if (!$this->reviewer->isPC) {
-                $options["myReviews"] = true;
-                return true;
-            } else {
+            if ($this->reviewer->isPC) {
                 return false;
             }
+            $options["myReviews"] = true;
+            return true;
         case "a":
             $options["author"] = true;
             // If complex author SQL, always do search the long way
@@ -1518,7 +1518,7 @@ class TextMatch_SearchTerm extends SearchTerm {
         } else if ($this->trivial !== null) {
             return $this->trivial;
         }
-        return $row->field_match_pregexes($this->regex, $this->field);
+        return $this->regex->match($row->{$this->field}());
     }
     function script_expression(PaperInfo $row, $about) {
         if ($about !== self::ABOUT_PAPER) {

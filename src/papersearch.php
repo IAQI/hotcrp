@@ -296,7 +296,6 @@ class PaperSearch extends MessageSet {
         $this->q = trim($options["q"] ?? "");
         $this->_req_sort = $options["sort"] ?? null;
         $this->_req_scoresort = $options["scoresort"] ?? null;
-        $this->set_want_ftext(true);
 
         // reviewer
         if (($reviewer = $options["reviewer"] ?? null)) {
@@ -643,9 +642,8 @@ class PaperSearch extends MessageSet {
             return $qx;
         } else if ($qx) {
             return SearchTerm::combine_in("or", $this->_string_context, ...$qx);
-        } else {
-            return new False_SearchTerm; // assume error already given
         }
+        return new False_SearchTerm; // assume error already given
     }
 
     /** @param string $str
@@ -661,18 +659,16 @@ class PaperSearch extends MessageSet {
     static private function _search_word_inferred_keyword($str) {
         if (preg_match('/\A([_a-zA-Z0-9][-_.a-zA-Z0-9]*)([=!<>]=?|≠|≤|≥)([^:\"]+\z|[^:\"]*\".*)/s', $str, $m)) {
             return $m;
-        } else {
-            return null;
         }
+        return null;
     }
 
     /** @return list<string> */
     private function _qt_fields() {
         if ($this->_qt === "n") {
             return $this->user->can_view_some_authors() ? ["ti", "ab", "au"] : ["ti", "ab"];
-        } else {
-            return [$this->_qt];
         }
+        return [$this->_qt];
     }
 
     /** @param string $kw
@@ -758,9 +754,8 @@ class PaperSearch extends MessageSet {
         $pos = SearchParser::span_balanced_parens($str, 0, null, true);
         if ($pos === strlen($str)) {
             return $str;
-        } else {
-            return "\"" . str_replace("\"", "\\\"", $str) . "\"";
         }
+        return "\"" . str_replace("\"", "\\\"", $str) . "\"";
     }
 
     /** @param ?SearchExpr $sa
@@ -940,30 +935,6 @@ class PaperSearch extends MessageSet {
     // The query may be liberal (returning more papers than actually match);
     // QUERY EVALUATION makes it precise.
 
-    static function unusable_ratings(Contact $user) {
-        if ($user->privChair
-            || $user->conf->setting("viewrev") === Conf::VIEWREV_ALWAYS) {
-            return [];
-        }
-        // This query should return those reviewIds whose ratings
-        // are not visible to the current querier:
-        // reviews by `$user` on papers with <=2 reviews and <=2 ratings
-        if ($user->conf->review_ratings() === 0) {
-            $npr_constraint = "reviewType>" . REVIEW_EXTERNAL;
-        } else {
-            $npr_constraint = "true";
-        }
-        $result = $user->conf->qe("select r.reviewId,
-            coalesce((select count(*) from ReviewRating force index (primary) where paperId=r.paperId),0) numRatings,
-            coalesce((select count(*) from PaperReview r force index (primary) where paperId=r.paperId and reviewNeedsSubmit=0 and {$npr_constraint}),0) numReviews
-            from PaperReview r
-            join ReviewRating rr on (rr.paperId=r.paperId and rr.reviewId=r.reviewId)
-            where r.contactId={$user->contactId}
-            having numReviews<=2 and numRatings<=2");
-        return Dbl::fetch_first_columns($result);
-    }
-
-
     /** @param SearchTerm $qe */
     private function _add_deleted_papers($qe) {
         if ($qe->type === "or" || $qe->type === "then") {
@@ -1073,9 +1044,8 @@ class PaperSearch extends MessageSet {
         $this->_has_qe || $this->main_term();
         if ($this->limit() === "all") {
             return $this->_qe;
-        } else {
-            return SearchTerm::combine("and", $this->_limit_qe, $this->_qe);
         }
+        return SearchTerm::combine("and", $this->_limit_qe, $this->_qe);
     }
 
     private function _prepare_result(SearchTerm $qe) {
@@ -1125,7 +1095,9 @@ class PaperSearch extends MessageSet {
             $sqi->add_column("size", "Paper.size");
         }
         foreach ($this->conf->rights_terms() as $st) {
+            $ctx = $sqi->set_context(SearchQueryInfo::CTX_ANY);
             $st->sqlexpr($sqi);
+            $sqi->set_context($ctx);
         }
 
         // create query

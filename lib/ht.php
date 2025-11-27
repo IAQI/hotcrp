@@ -372,6 +372,8 @@ class Ht {
         }
         $js["class"] = trim(($js["class"] ?? "") . " pseudohidden");
         $js["value"] = $value;
+        $js["aria-hidden"] = "true";
+        $js["tabindex"] = -1;
         return self::submit($name, "", $js);
     }
 
@@ -751,7 +753,7 @@ class Ht {
      * @param MessageItem|iterable<MessageItem>|MessageSet ...$mls
      * @return array{string,int} */
     static function fmt_feedback_msg_content($fmt, ...$mls) {
-        $mlx = MessageSet::fmt_list($fmt, ...$mls);
+        $mlx = MessageSet::make_fmt_list($fmt, ...$mls);
         if (($h = MessageSet::feedback_html($mlx)) !== "") {
             return [$h, MessageSet::list_status($mlx)];
         }

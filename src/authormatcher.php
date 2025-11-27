@@ -18,14 +18,20 @@ class AuthorMatcher extends Author {
 
     private static $wordinfo;
 
-    function __construct($x = null, $status = null) {
-        parent::__construct($x, $status);
-    }
-
-    /** @param object $x
-     * @return AuthorMatcher */
+    /** @param Author|AuthorMatcher $x
+     * @return AuthorMatcher
+     * @suppress PhanAccessReadOnlyProperty */
     static function make($x) {
-        return $x instanceof AuthorMatcher ? $x : new AuthorMatcher($x);
+        if ($x instanceof AuthorMatcher) {
+            return $x;
+        }
+        $m = new AuthorMatcher;
+        $m->firstName = $x->firstName;
+        $m->lastName = $x->lastName;
+        $m->email = $x->email;
+        $m->affiliation = $x->affiliation;
+        $m->seal_nea();
+        return $m;
     }
 
     /** @return AuthorMatcher */
@@ -35,23 +41,33 @@ class AuthorMatcher extends Author {
         return $m;
     }
 
-    /** @return AuthorMatcher */
+    /** @return AuthorMatcher
+     * @suppress PhanAccessReadOnlyProperty */
     static function make_affiliation($x) {
         $m = new AuthorMatcher;
         $m->affiliation = (string) $x;
+        $m->seal_nea();
+        return $m;
+    }
+
+    /** @param Contact $u
+     * @param ?int $status
+     * @return AuthorMatcher */
+    static function make_user($u, $status = null) {
+        $m = new AuthorMatcher;
+        $m->assign_user($u, $status);
         return $m;
     }
 
     /** @return ?AuthorMatcher */
     static function make_collaborator_line($x) {
-        if ($x !== "" && strcasecmp($x, "none") !== 0) {
-            $m = new AuthorMatcher;
-            $m->assign_string($x);
-            $m->status = Author::STATUS_NONAUTHOR;
-            return $m;
-        } else {
+        if ($x === "" || strcasecmp($x, "none") === 0) {
             return null;
         }
+        $m = new AuthorMatcher;
+        $m->assign_string($x);
+        $m->status = Author::STATUS_NONAUTHOR;
+        return $m;
     }
 
     /** @return Generator<AuthorMatcher> */
@@ -72,7 +88,7 @@ class AuthorMatcher extends Author {
 
 
     private function prepare_first(&$hlmatch) {
-        preg_match_all('/[a-z0-9]+/', $this->deaccent(0), $m);
+        preg_match_all('/[a-z0-9]+/', $this->searchable_nea("firstName"), $m);
         $fws = $m[0];
         if (empty($fws)) {
             return;
@@ -109,7 +125,7 @@ class AuthorMatcher extends Author {
     }
 
     private function prepare_affiliation(&$gmatch, &$hlmatch) {
-        preg_match_all('/[a-z0-9&]+/', $this->deaccent(2), $m);
+        preg_match_all('/[a-z0-9&]+/', $this->searchable_nea("affiliation"), $m);
         $aws = $m[0];
         if (empty($aws)) {
             return;
@@ -192,7 +208,7 @@ class AuthorMatcher extends Author {
             $this->prepare_first($hlmatch);
         }
         if ($this->lastName !== "") {
-            preg_match_all('/[a-z0-9]+/', $this->deaccent(1), $m);
+            preg_match_all('/[a-z0-9]+/', $this->searchable_nea("lastName"), $m);
             $rr = $ur = [];
             foreach ($m[0] as $w) {
                 $gmatch[] = $w;
@@ -247,7 +263,7 @@ class AuthorMatcher extends Author {
 
     const MATCH_NAME = 1;
     const MATCH_AFFILIATION = 2;
-    /** @param string|Author $au
+    /** @param string|Author|Contact $au
      * @return int */
     function test($au, $prefer_name = false) {
         if ($this->general_pregexes_ === false) {
@@ -262,17 +278,17 @@ class AuthorMatcher extends Author {
         if ($this->lastName_matcher
             && $au->lastName !== ""
             && ($this->lastName_simple
-                ? $this->lastName_simple === $au->deaccent(1)
-                : Text::match_pregexes($this->lastName_matcher, $au->lastName, $au->deaccent(1)))
+                ? $this->lastName_simple === $au->searchable_nea("lastName")
+                : $this->lastName_matcher->match_isna($au->lastName, $au->is_nea_nonascii()))
             && ($au->firstName === ""
                 || !$this->firstName_matcher
-                || Text::match_pregexes($this->firstName_matcher, $au->firstName, $au->deaccent(0)))) {
+                || $this->firstName_matcher->match_isna($au->firstName, $au->is_nea_nonascii()))) {
             return self::MATCH_NAME;
         }
         if ($this->affiliation_matcher
             && $au->affiliation !== ""
             && (!$prefer_name || $this->lastName === "" || $au->lastName === "")
-            && $this->test_affiliation($au->deaccent(2))) {
+            && $this->test_affiliation($au->searchable_nea("affiliation"))) {
             return self::MATCH_AFFILIATION;
         }
         return 0;

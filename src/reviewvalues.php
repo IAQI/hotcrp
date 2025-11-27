@@ -76,7 +76,6 @@ class ReviewValues extends MessageSet {
             $this->conf = $rf;
             $this->rf = $this->conf->review_form();
         }
-        $this->set_want_ftext(true);
         $this->clear_req();
     }
 
@@ -699,11 +698,12 @@ class ReviewValues extends MessageSet {
                                          $allow_new_submit, $approvable) {
         $oldstatus = $rrow->reviewStatus;
         $olddelivered = $oldstatus >= ReviewInfo::RS_DELIVERED;
+        $nonempty = $view_score > VIEWSCORE_EMPTY;
         if ($olddelivered
             && (!$this->can_unsubmit
                 || !$user->can_administer($prow))) {
             $minstatus = $oldstatus;
-        } else if ($view_score > VIEWSCORE_EMPTY
+        } else if ($nonempty
                    || $rrow->reviewModified > 1) {
             $minstatus = ReviewInfo::RS_DRAFTED;
         } else if ($user->is_my_review($rrow)
@@ -724,11 +724,15 @@ class ReviewValues extends MessageSet {
                 $maxstatus = ReviewInfo::RS_COMPLETED;
             } else if ($approval === "approved") {
                 $maxstatus = ReviewInfo::RS_APPROVED;
-            } else {
+            } else if ($nonempty) {
                 $maxstatus = ReviewInfo::RS_DELIVERED;
+            } else {
+                $maxstatus = $oldstatus;
             }
-        } else {
+        } else if ($nonempty) {
             $maxstatus = ReviewInfo::RS_COMPLETED;
+        } else {
+            $maxstatus = $oldstatus;
         }
         return max($maxstatus, $minstatus);
     }

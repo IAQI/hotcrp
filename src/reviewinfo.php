@@ -75,8 +75,6 @@ class ReviewInfo implements JsonSerializable {
 
     /** @var list<null|int|string> */
     public $fields;
-    /** @var ?list<null|false|string> */
-    private $_deaccent_fields;
 
     // scores
     // These scores are loaded from the database, but exposed only in `fields`
@@ -138,15 +136,6 @@ class ReviewInfo implements JsonSerializable {
     const RF_AUSEEN = 0x80000;
     const RF_AUSEEN_PREVIOUS = 0x100000;
     const RF_AUSEEN_LIVE = 0x200000;
-
-    /** @deprecated */
-    const RS_ACCEPTED = self::RS_ACKNOWLEDGED;
-    /** @deprecated */
-    const RF_ACCEPTED = self::RF_ACKNOWLEDGED;
-    /** @deprecated */
-    const RS_ADOPTED = self::RS_APPROVED;
-    /** @deprecated */
-    const RF_ADOPTED = self::RF_APPROVED;
 
     const RATING_GOODMASK = 1;
     const RATING_BADMASK = 126;
@@ -998,20 +987,11 @@ class ReviewInfo implements JsonSerializable {
 
     /** @param ?TextPregexes $reg
      * @param int $order
-     * @return bool */
+     * @return bool
+     * @deprecated */
     function field_match_pregexes($reg, $order) {
         $data = $this->fields[$order];
-        if (!isset($this->_deaccent_fields[$order])) {
-            if (!isset($this->_deaccent_fields)) {
-                $this->_deaccent_fields = $this->conf->review_form()->order_array(null);
-            }
-            if (is_usascii($data)) {
-                $this->_deaccent_fields[$order] = false;
-            } else {
-                $this->_deaccent_fields[$order] = UnicodeHelper::deaccent($data);
-            }
-        }
-        return Text::match_pregexes($reg, $data, $this->_deaccent_fields[$order]);
+        return $reg && $reg->match($this->fields[$order]);
     }
 
 
@@ -1120,17 +1100,16 @@ class ReviewInfo implements JsonSerializable {
         } else if (ctype_digit($s)) {
             $n = intval($s);
             return $n >= 0 && $n <= 127 ? $n : null;
-        } else {
-            $n = 0;
-            foreach (preg_split('/\s+/', $s) as $word) {
-                if (($k = array_search($word, ReviewInfo::$rating_bits)) !== false) {
-                    $n |= $k;
-                } else if ($word !== "" && $word !== "none") {
-                    return null;
-                }
-            }
-            return $n;
         }
+        $n = 0;
+        foreach (preg_split('/\s+/', $s) as $word) {
+            if (($k = array_search($word, ReviewInfo::$rating_bits)) !== false) {
+                $n |= $k;
+            } else if ($word !== "" && $word !== "none") {
+                return null;
+            }
+        }
+        return $n;
     }
 
     /** @param string $s

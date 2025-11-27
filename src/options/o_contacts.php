@@ -127,8 +127,9 @@ class Contacts_PaperOption extends PaperOption {
             $name = simplify_whitespace((string) $qreq["contacts:{$n}:name"]);
             $affiliation = simplify_whitespace((string) $qreq["contacts:{$n}:affiliation"]);
             $au = Author::make_keyed(["email" => $email, "name" => $name, "affiliation" => $affiliation]);
-            // XXX has_contacts:{$n}:active
-            $au->conflictType = $qreq["contacts:{$n}:active"] ? CONFLICT_CONTACTAUTHOR : 0;
+            $active = friendly_boolean($qreq["contacts:{$n}:active"])
+                ?? !isset($qreq["has_contacts:{$n}:active"]);
+            $au->conflictType = $active ? CONFLICT_CONTACTAUTHOR : 0;
             $au->author_index = $n;
             $reqau[] = $au;
             if (validate_email($email)) {
@@ -234,7 +235,9 @@ class Contacts_PaperOption extends PaperOption {
         }
         usort($curau, $this->conf->user_comparator());
 
-        $pt->print_editable_option_papt($this, null, ["id" => "contacts", "for" => false]);
+        $pt->print_editable_option_papt($this, null, [
+            "id" => "contacts", "for" => false, "fieldset" => true
+        ]);
         echo '<div class="papev"><div id="contacts:container">';
 
         $reqau = $reqov->anno("req_users") ?? [];
@@ -289,7 +292,7 @@ class Contacts_PaperOption extends PaperOption {
         self::echo_editable_newcontact_row($pt, '$', null, null);
         echo '</template><div class="ug">',
             Ht::button("Add contact", ["class" => "ui row-order-append", "data-rowset" => "contacts:container", "data-row-template" => "contacts:row-template"]),
-            "</div></div></div>\n\n";
+            "</div></div></fieldset>\n\n";
     }
     // XXX no render because paper strip
 }

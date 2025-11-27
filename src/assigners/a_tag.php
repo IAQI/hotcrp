@@ -156,7 +156,8 @@ class TagAssignmentPiece {
 
         // special values
         if (strcasecmp($xvalue, "none") === 0
-            || strcasecmp($xvalue, "clear") === 0) {
+            || strcasecmp($xvalue, "clear") === 0
+            || strcasecmp($xvalue, "delete") === 0) {
             $this->nvalue = false;
             return true;
         } else if (strcasecmp($xvalue, "next") === 0) {
@@ -572,7 +573,7 @@ class Tag_Assigner extends Assigner {
         }
         if ($this->index !== null
             && str_ends_with($this->tag, ':')) {
-            $aset->register_cleanup_function("colontag", function () use ($aset) {
+            $aset->register_cleanup_function("colontag", function ($aset) {
                 $aset->conf->save_refresh_setting("has_colontag", 1);
             });
         }

@@ -348,12 +348,12 @@ class ReviewForm_SettingParser extends SettingParser {
                 $sv->mark_no_diff("review_form");
             }
         }
-        return true;
     }
 
     function apply_req(Si $si, SettingValues $sv) {
         if ($si->name === "rf") {
-            return $this->_apply_req_review_form($si, $sv);
+            $this->_apply_req_review_form($si, $sv);
+            return true;
         }
         assert($si->name0 === "rf/");
         $fs = $sv->oldv($si->name0 . $si->name1);
@@ -370,6 +370,7 @@ class ReviewForm_SettingParser extends SettingParser {
         } else if ($si->name2 === "/type") {
             $this->_apply_req_type($si, $fs, $sv);
         }
+        return true;
     }
 
 
@@ -547,7 +548,7 @@ Note that complex HTML will not appear on offline review forms.</p></div>', 'set
             join("", MessageSet::feedback_html_items([
                 MessageItem::marked_note("Reviewers will be required to check this field to complete their reviews.")
             ])), '</li></ul>';
-        $sv->print_close_control_group(["horizontal" => true]);
+        $sv->print_group_close(["horizontal" => true]);
     }
 
     static function print_display(SettingValues $sv) {

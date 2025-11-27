@@ -95,7 +95,7 @@ class Search_Page {
         // Options
         foreach ($this->conf->options() as $ox) {
             if ($ox->search_keyword() !== false
-                && $ox->on_render_context(FieldRender::CFSUGGEST)
+                && $ox->published(FieldRender::CFSUGGEST)
                 && $pl->has("opt{$ox->id}")) {
                 $this->checkbox_item(10, $ox->search_keyword(), $ox->name);
             }
@@ -241,8 +241,7 @@ class Search_Page {
                 Ht::msg($search->full_feedback_html(), min($search->problem_status(), MessageSet::WARNING)),
                 '</div>';
         }
-
-        echo "<div class=\"maintabsep\"></div>\n\n";
+        echo "\n";
 
         if ($this->pl->has("sel")) {
             echo Ht::form($this->conf->selfurl($qreq, ["forceShow" => null], Conf::HOTURL_POST), ["id" => "sel", "class" => "ui-submit js-submit-list"]),
@@ -337,7 +336,7 @@ class Search_Page {
         echo '<div class="tld is-tla',
             $this->stab === "default" ? " active" : "",
             '" id="default" role="tabpanel" aria-labelledby="k-default-tab">',
-            Ht::form($this->conf->hoturl("search"), ["method" => "get", "class" => "form-basic-search"]),
+            Ht::form($this->conf->hoturl("search"), ["method" => "get", "class" => "form-basic-search", "role" => "search"]),
             Ht::entry("q", (string) $qreq->q, [
                 "size" => 40, "tabindex" => 1,
                 "class" => "papersearch want-focus need-suggest flex-grow-1",
@@ -353,7 +352,7 @@ class Search_Page {
         echo '<div class="tld is-tla',
             $this->stab === "advanced" ? " active" : "",
             '" id="advanced" role="tabpanel" aria-labelledby="k-advanced-tab">',
-            Ht::form($this->conf->hoturl("search"), ["method" => "get"]),
+            Ht::form($this->conf->hoturl("search"), ["method" => "get", "role" => "search"]),
             '<div class="d-inline-block">',
             '<div class="entryi medium"><label for="k-advanced-qt">Search</label><div class="entry">',
               Ht::select("qt", $qtOpt, $qreq->qt ?? "n", ["id" => "k-advanced-qt"]),

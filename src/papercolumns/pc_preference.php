@@ -29,8 +29,11 @@ class Preference_PaperColumn extends PaperColumn {
         }
         $this->editable = $cj->edit ?? false;
     }
-    function view_option_schema() {
+    static function basic_view_option_schema() {
         return ["topics", "topicscore/topics", "topic_score/topics", "edit", "all"];
+    }
+    function view_option_schema() {
+        return self::basic_view_option_schema();
     }
     function prepare(PaperList $pl, $visible) {
         $this->viewer = $pl->user;
@@ -47,7 +50,7 @@ class Preference_PaperColumn extends PaperColumn {
         }
         $this->secondary_sort_topic_score = $this->view_option("topics") ?? false;
         $this->all = $this->view_option("all") ?? false;
-        if ($visible || $this->secondary_sort_topic_score) {
+        if ($this->secondary_sort_topic_score) {
             $pl->qopts["topics"] = 1;
         }
         $this->prefix =  "";
@@ -158,11 +161,10 @@ class Preference_PaperColumn extends PaperColumn {
         return $t;
     }
     function text(PaperList $pl, PaperInfo $row) {
-        if (!$this->not_me || $this->viewer->can_view_preference($row)) {
-            return $row->preference($this->user)->unparse();
-        } else {
+        if ($this->not_me && !$this->viewer->can_view_preference($row)) {
             return "";
         }
+        return $row->preference($this->user)->unparse();
     }
     function has_statistics() {
         return !$this->as_row && !$this->editable;
@@ -189,11 +191,11 @@ class Preference_PaperColumn extends PaperColumn {
         return $rs;
     }
 
-    static function completions(Contact $user, $xfj) {
-        if ($user->isPC && $user->can_view_preference(null)) {
-            return ["pref:{user}"];
-        } else {
+    static function examples(Contact $user, $xfj) {
+        if (!$user->can_view_preference(null)) {
             return [];
         }
+        return [new SearchExample("pref:{user}", "<0>Review preference for PC member",
+                    new FmtArg("view_options", Preference_PaperColumn::basic_view_option_schema()))];
     }
 }

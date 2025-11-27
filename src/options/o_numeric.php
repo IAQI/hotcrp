@@ -55,13 +55,13 @@ class Numeric_PaperOption extends PaperOption {
         }
     }
 
-    function search_examples(Contact $viewer, $context) {
+    function search_examples(Contact $viewer, $venue) {
         return [
             $this->has_search_example(),
-            new SearchExample(
-                $this, $this->search_keyword() . ":{comparator}",
+            $this->make_search_example(
+                $this->search_keyword() . ":{comparator}",
                 "<0>submission’s {title} field is greater than 100",
-                new FmtArg("comparator", ">100")
+                new FmtArg("comparator", ">100", 0)
             )
         ];
     }

@@ -188,6 +188,7 @@ class Paper_Page {
         if ($whynot) {
             $conf->feedback_msg($whynot->set("expand", true)->message_list());
             $this->useRequest = !$is_new; // XXX used to have more complex logic
+            $this->ps->abort_save();
             return;
         }
 
@@ -234,7 +235,7 @@ class Paper_Page {
             } else {
                 $ml[] = MessageItem::urgent_note($conf->_("<0>Please correct these issues and save again."));
             }
-        } else if ($this->ps->has_problem()
+        } else if (($this->ps->has_problem() || $this->ps->has_urgent_note())
                    && $this->user->can_edit_paper($new_prow)) {
             $ml[] = MessageItem::warning_note($conf->_("<0>Please check these issues before completing the {submission}."));
         }
@@ -258,7 +259,6 @@ class Paper_Page {
         if (!$this->ps->has_error() || $new_prow->is_new()) {
             $conf->redirect_self($this->qreq, ["p" => $new_prow->paperId, "m" => "edit"]);
         }
-        $this->useRequest = false;
     }
 
     function handle_updatecontacts() {
@@ -293,7 +293,6 @@ class Paper_Page {
         if (!$this->ps->has_error()) {
             $conf->redirect_self($this->qreq);
         }
-        $this->useRequest = false;
     }
 
     private function prepare_edit_mode() {

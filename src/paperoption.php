@@ -233,7 +233,7 @@ class PaperOption implements JsonSerializable {
     }
 
     private function set_render_contexts() {
-        $this->render_contexts = FieldRender::CFPAGE | FieldRender::CFLIST | FieldRender::CFSUGGEST | FieldRender::CFMAIL | FieldRender::CFFORM;
+        $this->render_contexts = FieldRender::CFPAGE | FieldRender::CFLIST | FieldRender::CFSUGGEST | FieldRender::CFMAIL | FieldRender::CFFORM | FieldRender::CFAPI;
         foreach ($this->classes as $k) {
             if ($k === "hidden") {
                 $this->render_contexts = 0;
@@ -246,7 +246,7 @@ class PaperOption implements JsonSerializable {
             } else if ($k === "only-form") {
                 $this->render_contexts &= FieldRender::CFFORM;
             } else if ($k === "no-list") {
-                $this->render_contexts &= ~(FieldRender::CFLIST | FieldRender::CFSUGGEST);
+                $this->render_contexts &= ~(FieldRender::CFLIST | FieldRender::CFAPI | FieldRender::CFSUGGEST);
             } else if ($k === "no-suggest") {
                 $this->render_contexts &= ~FieldRender::CFSUGGEST;
             }
@@ -974,10 +974,16 @@ class PaperOption implements JsonSerializable {
     function on_page() {
         return ($this->render_contexts & FieldRender::CFPAGE) !== 0;
     }
-    /** @param int $context
+    /** @param int $venue
+     * @return bool
+     * @deprecated */
+    function on_render_context($venue) {
+        return ($this->render_contexts & $venue) !== 0;
+    }
+    /** @param int $venue
      * @return bool */
-    function on_render_context($context) {
-        return ($this->render_contexts & $context) !== 0;
+    function published($venue) {
+        return ($this->render_contexts & $venue) !== 0;
     }
 
     function render(FieldRender $fr, PaperValue $ov) {
@@ -996,24 +1002,33 @@ class PaperOption implements JsonSerializable {
         return null;
     }
 
-    /** @param int $context
+    /** @param string $q
+     * @param string $description
+     * @param string|FmtArg ...$args
+     * @return SearchExample */
+    final function make_search_example($q, $description = "", ...$args) {
+        $args[] = new FmtArg("title", $this->title(), 0);
+        $args[] = new FmtArg("keyword", $this->search_keyword(), 0);
+        return new SearchExample($q, $description, ...$args);
+    }
+    /** @param int $venue
      * @return list<SearchExample> */
-    function search_examples(Contact $viewer, $context) {
+    function search_examples(Contact $viewer, $venue) {
         return [];
     }
     /** @return SearchExample */
     function has_search_example() {
         assert($this->search_keyword() !== false);
-        return new SearchExample(
-            $this, "has:" . $this->search_keyword(),
+        return $this->make_search_example(
+            "has:" . $this->search_keyword(),
             "<0>{submission}’s {title} field is set"
         );
     }
     /** @return SearchExample */
     function text_search_example() {
         assert($this->search_keyword() !== false);
-        return new SearchExample(
-            $this, $this->search_keyword() . ":{text}",
+        return $this->make_search_example(
+            $this->search_keyword() . ":{text}",
             "<0>{submission}’s {title} field contains ‘{text}’",
             new FmtArg("text", "words")
         );
@@ -1157,7 +1172,7 @@ class Checkbox_PaperOption extends PaperOption {
         }
     }
 
-    function search_examples(Contact $viewer, $context) {
+    function search_examples(Contact $viewer, $venue) {
         return [$this->has_search_example()];
     }
     function parse_search(SearchWord $sword, PaperSearch $srch) {
@@ -1312,7 +1327,7 @@ class Selector_PaperOption extends PaperOption {
         $pt->print_editable_option_papt($this, null,
             $this->type === "dropdown"
             ? ["for" => $this->readable_formid()]
-            : ["id" => $this->readable_formid(), "for" => false]);
+            : ["id" => $this->readable_formid(), "for" => false, "fieldset" => true]);
         echo '<div class="papev">';
         if ($this->type === "dropdown") {
             $sel = [];
@@ -1336,7 +1351,7 @@ class Selector_PaperOption extends PaperOption {
                 }
             }
         }
-        echo "</div></div>\n\n";
+        echo "</div>", $this->type === "dropdown" ? "</div>" : "</fieldset>", "\n\n";
     }
 
     function render(FieldRender $fr, PaperValue $ov) {
@@ -1349,20 +1364,20 @@ class Selector_PaperOption extends PaperOption {
         return $this->value_search_keyword($idx);
     }
 
-    function search_examples(Contact $viewer, $context) {
+    function search_examples(Contact $viewer, $venue) {
         $a = [$this->has_search_example()];
-        if ($context === SearchExample::HELP) {
+        if ($venue === FieldRender::CFHELP) {
             if (($q = $this->value_search_keyword(2))) {
-                $a[] = new SearchExample(
-                    $this, $this->search_keyword() . ":{value}",
+                $a[] = $this->make_search_example(
+                    $this->search_keyword() . ":{value:sq}",
                     "<0>{submission}’s {title} field has value ‘{value}’",
-                    new FmtArg("value", $this->values[1])
+                    new FmtArg("value", $this->values[1], 0)
                 );
             }
         } else {
             foreach ($this->values as $s) {
-                $a[] = new SearchExample(
-                    $this, $this->search_keyword() . ":" . SearchWord::quote($s)
+                $a[] = $this->make_search_example(
+                    $this->search_keyword() . ":" . SearchWord::quote($s)
                 );
             }
         }
@@ -1440,9 +1455,8 @@ class Document_PaperOption extends PaperOption {
         if (($ov->value ?? 0) > 1) {
             /** @phan-suppress-next-line ParamTypeMismatchReturn */
             return [$ov->value];
-        } else {
-            return [];
         }
+        return [];
     }
     function value_export_json(PaperValue $ov, PaperExport $pex) {
         if (!$this->value_present($ov)) {
@@ -1496,24 +1510,23 @@ class Document_PaperOption extends PaperOption {
             return $ov;
         } else if ($qreq["{$fk}:delete"]) {
             return PaperValue::make($prow, $this);
-        } else {
-            return null;
         }
+        return null;
     }
     function parse_json_user(PaperInfo $prow, $j, Contact $user) {
         if ($j === false) {
             return PaperValue::make($prow, $this);
         } else if ($j === null) {
             return null;
-        } else if (DocumentInfo::check_json_upload($j)) {
-            $ov = PaperValue::make($prow, $this, PaperValue::NEWDOC_VALUE);
-            $ov->set_anno("document", $j);
-            if (isset($j->error_html)) {
-                $ov->error("<5>" . $j->error_html);
-            }
-            return $ov;
+        } else if (!DocumentInfo::check_json_upload($j)) {
+            return PaperValue::make_estop($prow, $this, "<0>Format error");
         }
-        return PaperValue::make_estop($prow, $this, "<0>Format error");
+        $ov = PaperValue::make($prow, $this, PaperValue::NEWDOC_VALUE);
+        $ov->set_anno("document", $j);
+        if (isset($j->error_html)) {
+            $ov->error("<5>" . $j->error_html);
+        }
+        return $ov;
     }
     function print_web_edit(PaperTable $pt, $ov, $reqov) {
         if (($this->id === DTYPE_SUBMISSION || $this->id === DTYPE_FINAL)
@@ -1553,7 +1566,8 @@ class Document_PaperOption extends PaperOption {
         }
         $pt->print_editable_option_papt($this, $heading, ["for" => $doc ? false : "{$fk}:uploader", "id" => $this->readable_formid()]);
 
-        echo '<div class="papev has-document" data-dtype="', $this->id,
+        echo '<div class="papev has-document" data-dt="', $this->id,
+            '" data-dtype="', $this->id, /* XXX backward compat */
             '" data-document-name="', $fk, '"';
         if ($doc) {
             echo ' data-docid="', $doc->paperStorageId, '"';
@@ -1628,6 +1642,18 @@ class Document_PaperOption extends PaperOption {
         return ["type"];
     }
 
+    /** @param DocumentInfo $doc
+     * @param string $html
+     * @param int $dif
+     * @return string */
+    static function link_html($doc, $html, $dif) {
+        $t = $doc->link_html($html, $dif);
+        if ($doc->is_archive()) {
+            $t = '<span class="archive foldc"><button type="button" class="q ui js-expand-archive pr-1">' . expander(null, 0) . '</button>' . $t . '</span>';
+        }
+        return $t;
+    }
+
     /** @param ?DocumentInfo $d */
     static function render_document(FieldRender $fr, PaperOption $opt, $d) {
         if (!$d) {
@@ -1639,10 +1665,11 @@ class Document_PaperOption extends PaperOption {
         if ($fr->want(FieldRender::CFFORM)) {
             $fr->set_html($d->link_html(htmlspecialchars($d->filename ?? ""), 0));
         } else if ($fr->want(FieldRender::CFPAGE)) {
-            $th = $opt->title_html();
-            $dif = $opt->display() === PaperOption::DISP_TOP ? 0 : DocumentInfo::L_SMALL;
             $fr->title = "";
-            $fr->set_html($d->link_html("<span class=\"pavfn\">{$th}</span>", $dif));
+            $fr->set_html(self::link_html(
+                $d, '<span class="pavfn">' . $opt->title_html() . '</span>',
+                $opt->display() === PaperOption::DISP_TOP ? 0 : DocumentInfo::L_SMALL
+            ));
         } else {
             $want_mimetype = $fr->column && $fr->column->view_option("type");
             if ($want_mimetype) {
@@ -1656,7 +1683,10 @@ class Document_PaperOption extends PaperOption {
             if ($fr->want(FieldRender::CFTEXT) || $want_mimetype) {
                 $fr->set_text($t);
             } else {
-                $fr->set_html($d->link_html(htmlspecialchars($t), DocumentInfo::L_SMALL | DocumentInfo::L_NOSIZE));
+                $fr->set_html(self::link_html(
+                    $d, htmlspecialchars($t),
+                    DocumentInfo::L_SMALL | DocumentInfo::L_NOSIZE
+                ));
             }
         }
     }
@@ -1694,14 +1724,14 @@ class Document_PaperOption extends PaperOption {
         return $fspec;
     }
 
-    function search_examples(Contact $viewer, $context) {
+    function search_examples(Contact $viewer, $venue) {
         return [$this->has_search_example()];
     }
     function parse_search(SearchWord $sword, PaperSearch $srch) {
         return $this->parse_boolean_search($sword, $srch);
     }
     function present_script_expression() {
-        return ["type" => "document_count", "formid" => $this->formid, "dtype" => $this->id];
+        return ["type" => "document_count", "formid" => $this->formid, "dt" => $this->id, "dtype" => $this->id /* XXX backward compat */];
     }
 }
 
@@ -1765,7 +1795,7 @@ class Text_PaperOption extends PaperOption {
         }
     }
 
-    function search_examples(Contact $viewer, $context) {
+    function search_examples(Contact $viewer, $venue) {
         return [$this->has_search_example(), $this->text_search_example()];
     }
     function parse_search(SearchWord $sword, PaperSearch $srch) {

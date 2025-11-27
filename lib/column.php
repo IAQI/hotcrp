@@ -22,8 +22,6 @@ class Column {
     public $sort = 0;
     /** @var ?int */
     public $fold;
-    /** @var bool|string */
-    public $completion = false;
     /** @var bool */
     public $sort_descending;
     /** @var ?list<int> */
@@ -66,9 +64,6 @@ class Column {
         }
         $this->sort_descending = $this->default_sort_descending();
         $this->fold = $arg["fold"] ?? null;
-        if (isset($arg["completion"])) {
-            $this->completion = $arg["completion"];
-        }
         $this->order = $arg["order"] ?? null;
         $this->__source_order = $arg["__source_order"] ?? null;
     }
@@ -102,8 +97,8 @@ class Column {
         // get schema
         if (self::$base_schema === null) {
             self::$base_schema = new ViewOptionSchema;
-            self::$base_schema->define("display=row|col,column");
-            self::$base_schema->define("sort=asc,ascending,up|desc,descending,down|forward|reverse");
+            self::$base_schema->define("display=row|col,column^");
+            self::$base_schema->define("sort=asc,ascending,up|desc,descending,down|forward|reverse^");
         }
         $schema = self::$base_schema;
         foreach ($this->view_option_schema() as $x) {

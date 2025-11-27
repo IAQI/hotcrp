@@ -58,8 +58,6 @@ final class PaperStatus extends MessageSet {
     private $_author_change_cids;
     /** @var ?list<Contact> */
     private $_created_contacts;
-    /** @var list<int> */
-    private $_dids;
     /** @var bool */
     private $_paper_submitted;
     /** @var bool */
@@ -69,7 +67,7 @@ final class PaperStatus extends MessageSet {
     /** @var bool */
     private $_document_pids_needed;
     /** @var list<DocumentInfo> */
-    private $_joindocs;
+    private $_docs;
     /** @var list<array{string,float|false}> */
     private $_tags_changed;
     /** @var int */
@@ -77,19 +75,19 @@ final class PaperStatus extends MessageSet {
 
     const SSF_PREPARED = 1;
     const SSF_SAVED = 2;
-    const SSF_NEW = 4;
-    const SSF_FINAL_PHASE = 8;
-    const SSF_SUBMIT = 16;
-    const SSF_NEWSUBMIT = 32;
-    const SSF_FINALSUBMIT = 64;
-    const SSF_ADMIN_UPDATE = 128;
-    const SSF_PIDFAIL = 256;
+    const SSF_ABORTED = 4;
+    const SSF_NEW = 8;
+    const SSF_FINAL_PHASE = 16;
+    const SSF_SUBMIT = 32;
+    const SSF_NEWSUBMIT = 64;
+    const SSF_FINALSUBMIT = 128;
+    const SSF_ADMIN_UPDATE = 256;
+    const SSF_PIDFAIL = 512;
 
-    function __construct(Contact $user, $options = []) {
+    function __construct(Contact $user) {
         $this->conf = $user->conf;
         $this->user = $user;
         $this->allow_hash_without_content = $user->privChair;
-        $this->set_want_ftext(true, 5);
         $this->set_ignore_duplicates(true);
     }
 
@@ -238,7 +236,8 @@ final class PaperStatus extends MessageSet {
                 && !str_starts_with($mi->field, "status:")) {
                 continue;
             }
-            if (($o = $this->conf->options()->option_by_key($mi->field))) {
+            if ($mi->message !== ""
+                && ($o = $this->conf->options()->option_by_key($mi->field))) {
                 if ($oids !== null && !in_array($o->id, $oids, true)) {
                     continue;
                 }
@@ -307,15 +306,13 @@ final class PaperStatus extends MessageSet {
             return null;
         }
 
-        if ($doc->documentType <= 0) {
-            $this->_joindocs[] = $doc;
-        }
-        $this->_dids[] = $doc->paperStorageId;
+        $this->_docs[] = $doc;
         if ($doc->paperId === 0 || $doc->paperId === -1) {
             $this->_document_pids_needed = true;
         } else {
             assert($doc->paperId === $this->prow->paperId);
         }
+        $doc->release_redundant_content();
         return $doc;
     }
 
@@ -1002,7 +999,9 @@ final class PaperStatus extends MessageSet {
             && $ctype >= CONFLICT_AUTHOR
             && strcasecmp($au->email, $this->user->email) === 0) {
             $this->user->ensure_account_here();
-            $uu = $this->conf->user_by_email($au->email, USER_SLICE);
+            if ($this->user->contactId > 0) {
+                $uu = $this->user;
+            }
         }
         if (!$uu && $ctype >= CONFLICT_AUTHOR) {
             $j = $au->unparse_nea_json();
@@ -1012,14 +1011,14 @@ final class PaperStatus extends MessageSet {
         if (!$uu) {
             return null;
         }
-        if ($uu->is_placeholder()) {
-            foreach (["firstName", "lastName", "affiliation"] as $nprop) {
-                if ($au->$nprop !== ""
-                    && ($uu->$nprop === "" || $ctype >= CONFLICT_CONTACTAUTHOR)) {
-                    $uu->set_prop($nprop, $au->$nprop);
-                }
+        if ($uu->is_placeholder() || $uu === $this->user) {
+            $uu->set_prop("firstName", $au->firstName, 2);
+            $uu->set_prop("lastName", $au->lastName, 2);
+            $uu->set_prop("affiliation", $au->affiliation, 2);
+            if ($uu->prop_changed()) {
+                $uu->save_prop();
+                $uu->export_prop(1);
             }
-            $uu->save_prop();
         }
         return $uu;
     }
@@ -1042,8 +1041,11 @@ final class PaperStatus extends MessageSet {
             $this->_conflict_values[$uid] = [0, 0, 0];
         }
         $cv = &$this->_conflict_values[$uid];
-        if ($mask !== (CONFLICT_PCMASK & ~1)
-            || ((($cv[0] & ~$cv[1]) | $cv[2]) & 1) === 0) {
+        $old = self::new_conflict_value($cv);
+        if ($mask === Conflict::FM_PC) {
+            $new = Conflict::apply_pc($old, $new, ($this->_save_status & self::SSF_ADMIN_UPDATE) !== 0);
+        }
+        if (($old & $mask) !== $new) {
             $cv[1] |= $mask;
             $cv[2] = ($cv[2] & ~$mask) | $new;
             $this->_conflict_changemask |= ($cv[0] ^ $cv[2]) & $mask;
@@ -1077,32 +1079,54 @@ final class PaperStatus extends MessageSet {
             $ov->option->value_save_conflict_values($ov, $this);
         }
 
-        $primaries = [];
+        $pchanges = [];
         foreach ($this->_conflict_values as $uid => &$cv) {
-            $ncv = self::new_conflict_value($cv);
-            if (($ncv & (CONFLICT_AUTHOR | CONFLICT_CONTACTAUTHOR)) === 0) {
+            $ncav = self::new_conflict_value($cv)
+                & (CONFLICT_AUTHOR | CONFLICT_CONTACTAUTHOR);
+            if ($ncav === 0) {
                 continue;
             }
-            $uu = $this->conf->user_by_id($uid, USER_SLICE);
-            if (($ncv & (CONFLICT_AUTHOR | CONFLICT_CONTACTAUTHOR)) === CONFLICT_AUTHOR
+            if ($ncav === CONFLICT_AUTHOR
                 && ($cv[0] & CONFLICT_CONTACTAUTHOR) !== 0) {
-                // can’t remove contact author who’s still on the author list
+                // can’t remove as contact if still on author list
                 $cv[2] |= CONFLICT_CONTACTAUTHOR;
+                $ncav |= CONFLICT_CONTACTAUTHOR;
             }
+            // record upcoming changes to primary
+            $uu = $this->conf->user_by_id($uid, USER_SLICE);
             if ($uu && $uu->primaryContactId > 0) {
-                $primaries[] = $uu->primaryContactId;
+                $pchanges[] = [$uid, $uu->primaryContactId, $ncav];
             }
         }
-        foreach ($primaries as $puid) {
-            $this->_conflict_values[$puid] = $this->_conflict_values[$puid] ?? [0, 0, 0];
-            $this->_conflict_values[$puid][1] |= CONFLICT_AUTHOR;
-            $this->_conflict_values[$puid][2] |= CONFLICT_AUTHOR;
+        unset($cv);
+
+        foreach ($pchanges as [$uid, $puid, $ncav]) {
+            // add authorship to primary
+            $cv = &$this->_conflict_values[$uid];
+            $pcv = &$this->_conflict_values[$puid];
+            $pcv = $pcv ?? [0, 0, 0];
+            $pcv[1] |= $ncav;
+            $pcv[2] |= $ncav;
+            // newly-added secondary contact redirects to primary, unless:
+            // 1. added by user with same primary
+            // 2. added by chair, and primary is already contact
+            if (($cv[0] & CONFLICT_CONTACTAUTHOR) === 0
+                && ($ncav & CONFLICT_CONTACTAUTHOR) !== 0
+                && $puid !== $this->user->contactId
+                && $puid !== $this->user->primaryContactId
+                && (!$this->user->privChair
+                    || ($pcv[0] & CONFLICT_CONTACTAUTHOR) === 0)) {
+                $cv[1] |= CONFLICT_CONTACTAUTHOR;
+                $cv[2] &= ~CONFLICT_CONTACTAUTHOR;
+            }
+            unset($cv, $pcv);
         }
+
         $this->checkpoint_conflict_values();
     }
 
     /** @return bool */
-    private function check_conflict_diff() {
+    private function _check_conflict_diff() {
         $changes = 0;
         foreach ($this->_conflict_values ?? [] as $cv) {
             $ncv = self::new_conflict_value($cv);
@@ -1111,10 +1135,29 @@ final class PaperStatus extends MessageSet {
         if (($changes & (CONFLICT_AUTHOR | CONFLICT_CONTACTAUTHOR)) !== 0) {
             $this->change_at($this->conf->option_by_id(PaperOption::CONTACTSID));
         }
-        if (($changes & CONFLICT_PCMASK) !== 0) {
+        if (($changes & Conflict::FM_PC) !== 0) {
             $this->change_at($this->conf->option_by_id(PaperOption::PCCONFID));
         }
-        return ($changes & (CONFLICT_PCMASK | CONFLICT_AUTHOR | CONFLICT_CONTACTAUTHOR)) !== 0;
+        return ($changes & (Conflict::FM_PC | CONFLICT_AUTHOR | CONFLICT_CONTACTAUTHOR)) !== 0;
+    }
+
+    /** @return list<int> */
+    private function _dids() {
+        $dids = [];
+        foreach ($this->_docs as $doc) {
+            $dids[] = $doc->paperStorageId;
+        }
+        return $dids;
+    }
+
+    private function _invalidate_uploaded_documents() {
+        if (empty($this->_docs)) {
+            return;
+        } else if ($this->prow->is_new()) {
+            $this->conf->qe("update PaperStorage set paperId=-1, inactive=1 where paperStorageId?a", $this->_dids());
+        } else {
+            $this->prow->mark_inactive_documents();
+        }
     }
 
     private function _check_contacts_last() {
@@ -1143,13 +1186,16 @@ final class PaperStatus extends MessageSet {
         }
 
         // exit if no change
-        if (!$this->check_conflict_diff()) {
+        if (!$this->_check_conflict_diff()) {
             return;
         }
 
         // save diffs if change
         $this->_conflict_ins = $this->_author_change_cids = [];
         foreach ($this->_conflict_values as $uid => $cv) {
+            if ($cv[1] === 0) { // no changes requested
+                continue;
+            }
             $ncv = self::new_conflict_value($cv);
             if (($cv[0] ^ $ncv) & (CONFLICT_AUTHOR | CONFLICT_CONTACTAUTHOR)) {
                 $this->_author_change_cids[] = $uid;
@@ -1173,7 +1219,7 @@ final class PaperStatus extends MessageSet {
         $this->_paper_submitted = false;
         $this->_documents_changed = $this->_document_pids_needed = false;
         $this->_noncontacts_changed = $prow->is_new();
-        $this->_dids = $this->_joindocs = $this->_tags_changed = [];
+        $this->_docs = $this->_tags_changed = [];
         $this->_save_status = 0;
         if ($this->user->can_administer($this->prow)) {
             $this->_save_status |= self::SSF_ADMIN_UPDATE;
@@ -1306,8 +1352,7 @@ final class PaperStatus extends MessageSet {
         if ($this->_normalize_and_check($pj)) {
             return true;
         }
-        $this->prow->abort_prop();
-        $this->prow->remove_option_overrides();
+        $this->abort_save();
         return false;
     }
 
@@ -1319,7 +1364,7 @@ final class PaperStatus extends MessageSet {
             }
             if ($opt->id === PaperOption::AUTHORSID
                 && (!$this->prow->authorInformation
-                    || $this->prow->authorInformation === (new Author($this->user))->unparse_tabbed())) {
+                    || $this->prow->authorInformation === Author::make_user($this->user)->unparse_tabbed())) {
                 continue;
             }
             return false;
@@ -1409,7 +1454,7 @@ final class PaperStatus extends MessageSet {
 
         // don't save if not allowed
         if ($this->problem_status() >= MessageSet::ESTOP) {
-            $this->check_conflict_diff(); // to ensure diffs are ok
+            $this->_check_conflict_diff(); // to ensure diffs are ok
             return false;
         }
 
@@ -1417,9 +1462,6 @@ final class PaperStatus extends MessageSet {
         if ($this->prow->is_new()
             && $this->_new_paper_is_empty()) {
             $this->error_at(null, $this->_("<0>Empty {submission}. Please fill out the fields and try again"));
-            if (!empty($this->_dids)) {
-                $this->conf->qe("update PaperStorage set paperId=-1 where paperId=?", $this->prow->paperId);
-            }
             return false;
         }
 
@@ -1430,9 +1472,22 @@ final class PaperStatus extends MessageSet {
     }
 
 
+    function abort_save() {
+        if (($this->_save_status & (self::SSF_SAVED | self::SSF_ABORTED)) === 0) {
+            $this->_save_status |= self::SSF_ABORTED;
+            $this->prow->abort_prop();
+            $this->prow->remove_option_overrides();
+            $this->_invalidate_uploaded_documents();
+        }
+    }
+
+
     private function _update_joindoc() {
-        $new_joinid = $this->prow->finalPaperStorageId;
-        if ($new_joinid <= 1) {
+        if ($this->prow->finalPaperStorageId > 1) {
+            $jointype = DTYPE_FINAL;
+            $new_joinid = $this->prow->finalPaperStorageId;
+        } else {
+            $jointype = DTYPE_SUBMISSION;
             $new_joinid = $this->prow->paperStorageId;
         }
 
@@ -1443,8 +1498,9 @@ final class PaperStatus extends MessageSet {
         }
 
         $new_joindoc = null;
-        foreach ($this->_joindocs as $doc) {
-            if ($doc->paperStorageId == $new_joinid)
+        foreach ($this->_docs as $doc) {
+            if ($doc->documentType === $jointype
+                && $doc->paperStorageId === $new_joinid)
                 $new_joindoc = $doc;
         }
 
@@ -1579,7 +1635,7 @@ final class PaperStatus extends MessageSet {
                 $ci1x = "PaperConflict.conflictType";
             }
             $clears |= $ci1;
-            if (($ci[1] & CONFLICT_PCMASK) === (CONFLICT_PCMASK & ~1)) {
+            if (($ci[1] & Conflict::FM_PC) === Conflict::FM_PCTYPE) {
                 $ci1a = $ci[1] & ~$ci[2] & $auflags;
                 $ci2a = $ci[2] & $auflags;
                 if ($ci1a !== 0) {
@@ -1639,6 +1695,27 @@ final class PaperStatus extends MessageSet {
         }
     }
 
+    private function _execute_documents() {
+        if (empty($this->_docs)) {
+            return;
+        }
+        if ($this->_document_pids_needed) {
+            $this->conf->qe("update PaperStorage set paperId=? where paperStorageId?a",
+                $this->paperId, $this->_dids());
+        }
+        $time_dids = [];
+        foreach ($this->_docs as $doc) {
+            $baseov = $this->prow->base_option($doc->documentType);
+            if (!in_array($doc->paperStorageId, $baseov->value_list())) {
+                $time_dids[] = $doc->paperStorageId;
+            }
+        }
+        if (!empty($time_dids)) {
+            $this->conf->qe("update PaperStorage set timeReferenced=? where paperId=? and paperStorageId?a",
+                $this->prow->timeModified, $this->paperId, $time_dids);
+        }
+    }
+
     private function _postexecute_notify() {
         $need_docinval = $this->_documents_changed && !$this->prow->is_new();
         $need_mail = [];
@@ -1663,8 +1740,7 @@ final class PaperStatus extends MessageSet {
         }
         if ($need_mail) {
             $rest = ["prow" => $prow];
-            if ($this->user->can_administer($prow)
-                && !$prow->has_author($this->user)) {
+            if (($this->_save_status & self::SSF_ADMIN_UPDATE) !== 0) {
                 $rest["adminupdate"] = true;
             }
             foreach ($need_mail as $u) {
@@ -1676,8 +1752,8 @@ final class PaperStatus extends MessageSet {
     /** @return bool */
     function execute_save() {
         // refuse to save if not prepared
-        if (($this->_save_status & (self::SSF_PREPARED | self::SSF_SAVED)) !== self::SSF_PREPARED) {
-            throw new ErrorException("Refusing to save paper with errors");
+        if (($this->_save_status & (self::SSF_PREPARED | self::SSF_SAVED | self::SSF_ABORTED)) !== self::SSF_PREPARED) {
+            throw new ErrorException("execute_save called inappropriately");
         }
         assert($this->paperId === null);
         $this->_save_status |= self::SSF_SAVED;
@@ -1688,9 +1764,13 @@ final class PaperStatus extends MessageSet {
             $opt->value_save($this->prow->option($opt), $this);
         }
 
-        if ($this->prow->prop_changed()) {
+        // update timeModified if submission fields or status fields have changed
+        if ($this->prow->user_prop_changed() || !empty($this->_fdiffs)) {
             $modified_at = max(Conf::$now, $this->prow->timeModified + 1);
             $this->prow->set_prop("timeModified", $modified_at);
+        }
+
+        if ($this->prow->prop_changed()) {
             if ($this->prow->prop_changed("paperStorageId")
                 || $this->prow->prop_changed("finalPaperStorageId")) {
                 $this->_update_joindoc();
@@ -1709,10 +1789,7 @@ final class PaperStatus extends MessageSet {
         $this->_execute_options();
         $this->_execute_conflicts();
         $this->_execute_author_changes();
-
-        if ($this->_document_pids_needed) {
-            $this->conf->qe("update PaperStorage set paperId=? where paperStorageId?a", $this->paperId, $this->_dids);
-        }
+        $this->_execute_documents();
 
         // maybe update `papersub` settings
         $was_submitted = $this->prow->base_prop("timeWithdrawn") <= 0
@@ -1761,7 +1838,7 @@ final class PaperStatus extends MessageSet {
         // save new title and clear out memory
         $this->title = $this->prow->title();
         $this->prow = null;
-        $this->_dids = $this->_joindocs = null;
+        $this->_docs = null;
         return true;
     }
 

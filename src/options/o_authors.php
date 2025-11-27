@@ -25,7 +25,7 @@ class Authors_PaperOption extends PaperOption {
         $au = [];
         foreach (self::author_list($ov) as $auth) {
             $au[] = $j = (object) $auth->unparse_nea_json();
-            if ($auth->email !== ""
+            if (validate_email($auth->email)
                 && in_array(strtolower($auth->email), $lemails, true)) {
                 $j->contact = true;
             }
@@ -58,6 +58,12 @@ class Authors_PaperOption extends PaperOption {
                 || !$ov->prow->can_author_view_decision())) {
             $req_orcid = 0;
         }
+        $base_authors = null;
+        if ($req_orcid > 0
+            && !$ov->has_error()) {
+            $base_authors = self::author_list($ov->prow->base_option($this->id));
+        }
+
         $msg_bademail = $msg_missing = $msg_dupemail = false;
         $msg_orcid = [];
         $n = 0;
@@ -87,7 +93,10 @@ class Authors_PaperOption extends PaperOption {
                 continue;
             }
             if ($req_orcid > 0) {
-                $status = $req_orcid === 2 ? 1 : 2;
+                $status = 1;
+                if ($req_orcid === 1 && $ov->prow->want_submitted()) {
+                    $status = 2;
+                }
                 if ($auth->email === "") {
                     $msg_missing = true;
                     $ov->append_item(new MessageItem($status, "authors:{$n}:email"));
@@ -95,6 +104,15 @@ class Authors_PaperOption extends PaperOption {
                            || !$u->confirmed_orcid()) {
                     $msg_orcid[] = $auth->email;
                     $ov->append_item(new MessageItem($status, "authors:{$n}"));
+                } else {
+                    $status = 0;
+                }
+                if ($status !== 0
+                    && $base_authors !== null
+                    && ($auth->email === ""
+                        ? !Author::find_match($auth, $base_authors)
+                        : !Author::find_by_email($auth->email, $base_authors))) {
+                    $base_authors = null;
                 }
             }
             if ($auth->email !== ""
@@ -119,8 +137,15 @@ class Authors_PaperOption extends PaperOption {
             $ov->warning("<0>The same email address has been used for different authors. This is usually an error");
         }
         if ($msg_orcid) {
-            $ov->error($this->conf->_("<5>Some authors have not configured their <a href=\"https://orcid.org\">ORCID iDs</a>"));
-            $ov->inform($this->conf->_("<0>This site requires that authors provide ORCID iDs. Please ask {0:list} to sign in and update their profiles.", new FmtArg(0, $msg_orcid, 0)));
+            $status = 2;
+            if ($req_orcid === 1 && !$ov->prow->want_submitted()) {
+                $status = 1;
+            }
+            $ov->append_item(new MessageItem($status, "authors", $this->conf->_("<5>Some authors haven’t added an <a href=\"https://orcid.org\">ORCID iD</a> to their profiles")));
+            $ov->inform($this->conf->_("<0>This site requires that all authors provide ORCID iDs. Please ask {0:list} to sign in and update their profiles.", new FmtArg(0, $msg_orcid, 0)));
+        }
+        if ($base_authors !== null) {
+            $ov->append_item(MessageItem::success(null));
         }
     }
 
@@ -142,7 +167,7 @@ class Authors_PaperOption extends PaperOption {
     function value_save_conflict_values(PaperValue $ov, PaperStatus $ps) {
         $ps->clear_conflict_values(CONFLICT_AUTHOR);
         foreach (self::author_list($ov) as $i => $auth) {
-            if ($auth->email !== "") {
+            if (validate_email($auth->email)) {
                 $cflags = CONFLICT_AUTHOR
                     | ($ov->anno("contact:{$auth->email}") ? CONFLICT_CONTACTAUTHOR : 0);
                 $ps->update_conflict_value($auth, $cflags, $cflags);
@@ -153,13 +178,7 @@ class Authors_PaperOption extends PaperOption {
     static private function expand_author(Author $au, PaperInfo $prow) {
         if ($au->email !== ""
             && ($aux = $prow->author_by_email($au->email))) {
-            if ($au->firstName === "" && $au->lastName === "") {
-                $au->firstName = $aux->firstName;
-                $au->lastName = $aux->lastName;
-            }
-            if ($au->affiliation === "") {
-                $au->affiliation = $aux->affiliation;
-            }
+            $au->merge($aux);
         }
     }
     /** @param list<Author> $authors
@@ -183,26 +202,28 @@ class Authors_PaperOption extends PaperOption {
             if ($email === null && $name === null && $aff === null) {
                 break;
             }
-            $auth = new Author;
+            $auf = $aul = $aue = $aua = "";
             $name = simplify_whitespace($name ?? "");
             if ($name !== "" && $name !== "Name") {
-                list($auth->firstName, $auth->lastName, $auth->email) = Text::split_name($name, true);
+                list($auf, $aul, $aue) = Text::split_name($name, true);
             }
             $email = simplify_whitespace($email ?? "");
             if ($email !== "" && $email !== "Email") {
-                $auth->email = $email;
+                $aue = $email;
             }
             $aff = simplify_whitespace($aff ?? "");
             if ($aff !== "" && $aff !== "Affiliation") {
-                $auth->affiliation = $aff;
+                $aua = $aff;
             }
             // some people enter email in the affiliation slot
             if (strpos($aff, "@") !== false
                 && validate_email($aff)
-                && !validate_email($auth->email)) {
-                $auth->affiliation = $auth->email;
-                $auth->email = $aff;
+                && !validate_email($aue)) {
+                $tmp = $aue;
+                $aue = $aua;
+                $aua = $tmp;
             }
+            $auth = Author::make_nae($auf, $aul, $aue, $aua);
             self::expand_author($auth, $prow);
             $authors[] = $auth;
         }
@@ -225,7 +246,7 @@ class Authors_PaperOption extends PaperOption {
             }
             self::expand_author($auth, $prow);
             $authors[] = $auth;
-            if ($contact && $auth->email !== "") {
+            if ($contact && validate_email($auth->email)) {
                 $cemail[] = $auth->email;
             }
         }
@@ -270,13 +291,13 @@ class Authors_PaperOption extends PaperOption {
             && !$au
             && !$pt->user->can_administer($pt->prow)
             && (!$reqau || $reqau->nea_equals($pt->user->populated_user()))) {
-            $reqau = new Author($pt->user->populated_user());
+            $reqau = Author::make_user($pt->user->populated_user());
             $ignore_diff = true;
         }
 
         echo '<div class="author-entry draggable d-flex">';
         if ($shownum) {
-            echo '<div class="flex-grow-0"><button type="button" class="draghandle ui js-dropmenu-open ui-drag row-order-draghandle need-tooltip need-dropmenu" draggable="true" title="Click or drag to reorder" data-tooltip-anchor="e">&zwnj;</button></div>',
+            echo '<div class="flex-grow-0"><button type="button" class="draghandle ui uikd js-dropmenu-button ui-drag row-order-draghandle need-tooltip need-dropmenu" draggable="true" title="Click or drag to reorder" data-tooltip-anchor="e" aria-haspopup="menu" aria-expanded="false">&zwnj;</button></div>',
                 '<div class="flex-grow-0 row-counter">', $n, '.</div>';
         }
         echo '<div class="flex-grow-1">',
@@ -304,7 +325,7 @@ class Authors_PaperOption extends PaperOption {
             $title .= ' <span class="n">(anonymous until review)</span>';
         }
         $pt->print_editable_option_papt($this, $title, [
-            "id" => "authors", "for" => false
+            "id" => "authors", "for" => false, "fieldset" => true
         ]);
 
         $min_authors = $this->max_count > 0 ? min(5, $this->max_count) : 5;
@@ -333,7 +354,7 @@ class Authors_PaperOption extends PaperOption {
         echo '</div>';
         echo '<template id="authors:row-template" class="hidden">';
         $this->echo_editable_authors_line($pt, '$', null, null, $this->max_count !== 1);
-        echo "</template></div></div>\n\n";
+        echo "</template></div></fieldset>\n\n";
     }
 
     function field_fmt_context() {
@@ -343,28 +364,26 @@ class Authors_PaperOption extends PaperOption {
     function render(FieldRender $fr, PaperValue $ov) {
         if ($fr->want(FieldRender::CFPAGE)) {
             $fr->table->render_authors($fr, $this);
-        } else {
-            $names = ["<ul class=\"x namelist\">"];
-            foreach (self::author_list($ov) as $au) {
-                $n = htmlspecialchars(trim("{$au->firstName} {$au->lastName}"));
-                if ($au->email !== "") {
-                    $ehtml = htmlspecialchars($au->email);
-                    $e = "&lt;<a href=\"mailto:{$ehtml}\" class=\"q\">{$ehtml}</a>&gt;";
-                } else {
-                    $e = "";
-                }
-                $t = ($n === "" ? $e : $n);
-                if ($au->affiliation !== "") {
-                    $t .= " <span class=\"auaff\">(" . htmlspecialchars($au->affiliation) . ")</span>";
-                }
-                if ($n !== "" && $e !== "") {
-                    $t .= " " . $e;
-                }
-                $names[] = "<li class=\"odname\">{$t}</li>";
-            }
-            $names[] = "</ul>";
-            $fr->set_html(join("", $names));
+            return;
         }
+        $names = ["<ul class=\"x namelist\">"];
+        foreach (self::author_list($ov) as $au) {
+            $n = htmlspecialchars(trim("{$au->firstName} {$au->lastName}"));
+            $e = htmlspecialchars($au->email);
+            if ($e !== "") {
+                $e = "&lt;<a href=\"mailto:{$e}\" class=\"q\">{$e}</a>&gt;";
+            }
+            $t = ($n === "" ? $e : $n);
+            if ($au->affiliation !== "") {
+                $t .= " <span class=\"auaff\">(" . htmlspecialchars($au->affiliation) . ")</span>";
+            }
+            if ($n !== "" && $e !== "") {
+                $t .= " " . $e;
+            }
+            $names[] = "<li class=\"odname\">{$t}</li>";
+        }
+        $names[] = "</ul>";
+        $fr->set_html(join("", $names));
     }
 
     function jsonSerialize() {

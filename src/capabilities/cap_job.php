@@ -14,8 +14,8 @@ class Job_Capability extends TokenInfo {
         return (new Job_Capability($user->conf))
             ->set_user($user)
             ->set_token_pattern("hcj_[24]")
-            ->set_invalid_after(86400)
-            ->set_expires_after(86400)
+            ->set_invalid_in(86400)
+            ->set_expires_in(86400)
             ->set_input(["batch_class" => $batch_class, "argv" => $argv]);
     }
 
@@ -25,13 +25,13 @@ class Job_Capability extends TokenInfo {
         if ($token === "e") {
             $token = getenv("HOTCRP_JOB");
         }
-        if ($token && strpos($token, "_") === false) {
+        if ($token === null || strlen($token) < 24) {
+            return null;
+        }
+        if (strpos($token, "_") === false) {
             $token = "hcj_{$token}";
         }
-        if ($token !== null && strlen($token) >= 20) {
-            return $token;
-        }
-        return null;
+        return $token;
     }
 
     /** @param string $token
@@ -84,12 +84,12 @@ class Job_Capability extends TokenInfo {
             throw new CommandLineException("No such job `{$salt}`");
         }
         while (true) {
-            if ($tok->data !== null) {
+            if ($tok->encoded_data() !== null) {
                 throw new CommandLineException("Job `{$salt}` has already started");
             }
             $new_data = '{"status":"run"}';
             $result = Dbl::qe($conf->dblink,
-                "update Capability set `data`=? where salt=? and `data` is null",
+                "update Capability set `data`=? where salt=? and `data` is null and dataOverflow is null",
                 $new_data, $tok->salt);
             if ($result->affected_rows > 0) {
                 $tok->assign_data($new_data);
@@ -99,25 +99,56 @@ class Job_Capability extends TokenInfo {
         }
     }
 
-    /** @param string|callable():string $redirect_uri
+    /** @param bool|string $output
+     * @return JsonResult */
+    function json_result($output = false) {
+        $ok = $this->is_active();
+        $answer = [
+            "ok" => $ok,
+            "status" => "wait",
+            "update_at" => $this->timeUsed ? : $this->timeCreated
+        ];
+        foreach ((array) $this->data() as $k => $v) {
+            if ($k === ""
+                || $k[0] === "_"
+                || $k[0] === "#"
+                || $k === "ok"
+                || $k === "update_at") {
+                continue;
+            }
+            $answer[$k] = $v;
+        }
+        if ($output && $this->outputData !== null) {
+            if ((str_starts_with($this->outputData, "{")
+                 || str_starts_with($this->outputData, "["))
+                && $output !== "text"
+                && ($j = json_decode($this->outputData))) {
+                $answer["output"] = $j;
+            } else if (is_valid_utf8($this->outputData)) {
+                $answer["output"] = $this->outputData;
+            } else {
+                $answer["output_base64"] = base64_encode($this->outputData);
+            }
+        }
+        return new JsonResult($ok ? 200 : 409, $answer);
+    }
+
+    /** @param callable():void $detach_function
      * @return 'forked'|'detached'|'done' */
-    function run_live(?Qrequest $qreq = null, $redirect_uri = null) {
+    function run_live($detach_function = null) {
         $batch_class = $this->input("batch_class");
 
         $status = "done";
-        $detacher = function () use (&$status, $qreq, $redirect_uri) {
-            if (PHP_SAPI === "fpm-fcgi" && $status === "done") {
-                $status = "detached";
-                if ($redirect_uri) {
-                    $u = is_string($redirect_uri) ? $redirect_uri : call_user_func($redirect_uri);
-                    header("Location: {$u}");
+        $detacher = null;
+        if (PHP_SAPI === "fpm-fcgi" && $detach_function) {
+            $detacher = function () use (&$status, $detach_function) {
+                if ($status === "done") {
+                    $status = "detached";
+                    call_user_func($detach_function);
+                    fastcgi_finish_request();
                 }
-                if ($qreq) {
-                    $qreq->qsession()->commit();
-                }
-                fastcgi_finish_request();
-            }
-        };
+            };
+        }
         putenv("HOTCRP_JOB={$this->salt}");
 
         try {
@@ -191,8 +222,7 @@ class Job_Capability extends TokenInfo {
     static function shell_quote_light($word) {
         if (preg_match('/\A[-_.,:+\/a-zA-Z0-9][-_.,:=+\/a-zA-Z0-9~]*\z/', $word)) {
             return $word;
-        } else {
-            return escapeshellarg($word);
         }
+        return escapeshellarg($word);
     }
 }

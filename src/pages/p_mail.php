@@ -208,7 +208,7 @@ class Mail_Page {
 
         $opts = array_filter($this->conf->options()->normal(), function ($o) {
             return $o->search_keyword() !== false
-                && $o->on_render_context(FieldRender::CFMAIL);
+                && $o->published(FieldRender::CFMAIL);
         });
         usort($opts, function ($a, $b) {
             if ($a->is_final() !== $b->is_final()) {
@@ -308,7 +308,7 @@ class Mail_Page {
                 $this->recip->warning_at("q", "<0>No papers match that search");
             }
         }
-        echo '<div class="', $this->recip->control_class("q", "fx8 mt-1 d-flex"), '">';
+        echo '<div class="', $this->recip->control_class("q", "fx8 mt-1"), '"><div class="d-flex">';
         if (!$this->viewer->privChair) {
             echo '<label for="q" class="mr-2">Papers:</label>';
         }
@@ -323,7 +323,7 @@ class Mail_Page {
         } else {
             echo Ht::select("t", $this->search_topt, $this->qreq->t, ["id" => "t"]);
         }
-        echo Ht::submit("psearch", "Search"), '</div></div>',
+        echo Ht::submit("psearch", "Search"), '</div></div></div>',
             $this->recip->feedback_html_at("q");
         if ($plist && !$plist->is_empty()) {
             echo '<div class="fx8 mt-2">';
@@ -369,7 +369,7 @@ class Mail_Page {
 
         // form
         echo Ht::form($this->conf->hoturl("=mail", ["check" => 1, "monreq" => $this->qreq->monreq]), [
-                "id" => "mailform",
+                "id" => "f-mail",
                 "data-default-messages" => json_encode_browser((object) $templates),
                 "class" => "ui-submit js-selector-summary"
             ]),

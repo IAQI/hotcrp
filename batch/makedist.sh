@@ -82,11 +82,16 @@ users.php
 
 batch/.htaccess
 batch/actionlog.php
+batch/apispec.php
 batch/assign.php
 batch/autoassign.php
 batch/backupdb.php
 batch/checkinvariants.php
+batch/cli/cli_assign.php
+batch/cli/cli_autoassign.php
+batch/cli/cli_job.php
 batch/cli/cli_paper.php
+batch/cli/cli_parameterhelp.php
 batch/cli/cli_search.php
 batch/cli/cli_settings.php
 batch/cli/cli_test.php
@@ -123,6 +128,7 @@ devel/openapi.json
 
 etc/.htaccess
 etc/affiliationmatchers.json
+etc/apiexpansions.json
 etc/apifunctions.json
 etc/assignmentparsers.json
 etc/autoassigners.json
@@ -219,6 +225,7 @@ src/api/api_assign.php
 src/api/api_comment.php
 src/api/api_completion.php
 src/api/api_decision.php
+src/api/api_document.php
 src/api/api_error.php
 src/api/api_events.php
 src/api/api_follow.php
@@ -238,6 +245,7 @@ src/api/api_search.php
 src/api/api_searchconfig.php
 src/api/api_session.php
 src/api/api_settings.php
+src/api/api_sharing.php
 src/api/api_specvalidator.php
 src/api/api_taganno.php
 src/api/api_tags.php
@@ -253,6 +261,7 @@ src/assigners/a_follow.php
 src/assigners/a_lead.php
 src/assigners/a_preference.php
 src/assigners/a_review.php
+src/assigners/a_sharing.php
 src/assigners/a_status.php
 src/assigners/a_tag.php
 src/assigners/a_taganno.php
@@ -375,6 +384,7 @@ src/multiconference.php
 src/notificationinfo.php
 src/options/o_abstract.php
 src/options/o_attachments.php
+src/options/o_authorcertification.php
 src/options/o_authors.php
 src/options/o_checkboxes.php
 src/options/o_checkboxesbase.php
@@ -394,7 +404,6 @@ src/pages/p_autoassign.php
 src/pages/p_bulkassign.php
 src/pages/p_buzzer.php
 src/pages/p_cacheable.php
-src/pages/p_changeemail.php
 src/pages/p_checkupdates.php
 src/pages/p_conflictassign.php
 src/pages/p_deadlines.php
@@ -576,6 +585,7 @@ src/valueformat.php
 src/viewcommand.php
 src/viewoptionlist.php
 src/viewoptionschema.php
+src/viewoptiontype.php
 src/xtparams.php
 
 devel/hotcrp.vim

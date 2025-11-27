@@ -1,5 +1,5 @@
 <?php
-// paper_cli.php -- Hotcrapi script for interacting with site APIs
+// cli_paper.php -- Hotcrapi script for interacting with site APIs
 // Copyright (c) 2006-2025 Eddie Kohler; see LICENSE.
 
 class Paper_CLIBatch implements CLIBatchCommand {
@@ -85,13 +85,13 @@ class Paper_CLIBatch implements CLIBatchCommand {
 
     /** @return int */
     function run_get(Hotcrapi_Batch $clib) {
-        curl_setopt($clib->curlh, CURLOPT_CUSTOMREQUEST, "GET");
-        curl_setopt($clib->curlh, CURLOPT_URL, $this->urlbase);
-        if (!$clib->exec_api(null)) {
+        $curlh = $clib->make_curl("GET");
+        curl_setopt($curlh, CURLOPT_URL, $this->urlbase);
+        if (!$clib->exec_api($curlh, null)) {
             return 1;
         }
         $k = isset($this->p) ? "paper" : "papers";
-        $clib->set_json_output($clib->content_json->$k);
+        $clib->set_output_json($clib->content_json->$k);
         return 0;
     }
 
@@ -107,36 +107,18 @@ class Paper_CLIBatch implements CLIBatchCommand {
 
     /** @return int */
     function run_save(Hotcrapi_Batch $clib) {
-        if ($this->cf->size === null
-            || $this->cf->size > $clib->chunk) {
-            $upb = (new Upload_CLIBatch($this->cf))->set_temporary(true);
-            $upload = $upb->execute($clib);
-            if (!$upload) {
-                return 1;
-            }
-            curl_setopt($clib->curlh, CURLOPT_URL, $this->url_with(["upload" => $upload]));
-            curl_setopt($clib->curlh, CURLOPT_CUSTOMREQUEST, "POST");
-            curl_setopt($clib->curlh, CURLOPT_POSTFIELDS, "");
-        } else {
-            $s = stream_get_contents($this->cf->stream);
-            if ($s === false) {
-                throw CommandLineException::make_file_error($this->cf->input_filename);
-            }
-            $mt = Mimetype::content_type($s);
-            if ($mt !== Mimetype::ZIP_TYPE) {
-                if (!preg_match('/\A\s*+[\[\{]/s', $s)) {
-                    throw new CommandLineException("{$this->cf->input_filename}: Expected ZIP or JSON");
-                }
-                $mt = Mimetype::JSON_TYPE . "; charset=utf-8";
-            }
-            curl_setopt($clib->curlh, CURLOPT_URL, $this->urlbase);
-            curl_setopt($clib->curlh, CURLOPT_CUSTOMREQUEST, "POST");
-            curl_setopt($clib->curlh, CURLOPT_POSTFIELDS, $s);
-            curl_setopt($clib->curlh, CURLOPT_HTTPHEADER, [
-                "Content-Type: {$mt}", "Content-Length: " . strlen($s)
-            ]);
+        $args = [];
+        $curlh = $clib->make_curl("POST");
+        $upb = (new Upload_CLIBatch($this->cf))->set_temporary(true)
+            ->set_try_mimetypes(Mimetype::ZIP_TYPE, Mimetype::JSON_UTF8_TYPE)
+            ->set_require_mimetype(true);
+        if (($token = $upb->attach_or_execute($curlh, $clib))) {
+            $args["upload"] = $token;
+        } else if ($clib->has_error()) {
+            return 1;
         }
-        $ok = $clib->exec_api(null);
+        curl_setopt($curlh, CURLOPT_URL, $this->url_with($args));
+        $ok = $clib->exec_api($curlh, null);
 
         $ml = $clib->message_list();
         $clib->clear_messages();
@@ -181,18 +163,19 @@ class Paper_CLIBatch implements CLIBatchCommand {
             fwrite(STDERR, $clib->content_string);
         }
         if (isset($clib->content_json->paper)) {
-            $clib->set_json_output($clib->content_json->paper);
+            $clib->set_output_json($clib->content_json->paper);
         } else if (isset($clib->content_json->papers)) {
-            $clib->set_json_output($clib->content_json->papers);
+            $clib->set_output_json($clib->content_json->papers);
         }
         return $ok ? 0 : 1;
     }
 
     /** @return int */
     function run_delete(Hotcrapi_Batch $clib) {
-        curl_setopt($clib->curlh, CURLOPT_URL, $this->urlbase);
-        curl_setopt($clib->curlh, CURLOPT_CUSTOMREQUEST, "DELETE");
-        $ok = $clib->exec_api(null);
+        $curlh = $clib->make_curl();
+        curl_setopt($curlh, CURLOPT_URL, $this->urlbase);
+        curl_setopt($curlh, CURLOPT_CUSTOMREQUEST, "DELETE");
+        $ok = $clib->exec_api($curlh, null);
         if (isset($clib->content_json->valid)) {
             if (!$clib->content_json->valid) {
                 $clib->error_at(null, "<0>Delete invalid");
@@ -209,7 +192,7 @@ class Paper_CLIBatch implements CLIBatchCommand {
     }
 
     /** @return Paper_CLIBatch */
-    static function make_arg(Hotcrapi_Batch $clib, Getopt $getopt, $arg) {
+    static function make_arg(Hotcrapi_Batch $clib, $arg) {
         $pcb = new Paper_CLIBatch;
         $argv = $arg["_"];
         $argc = count($argv);
@@ -226,25 +209,25 @@ class Paper_CLIBatch implements CLIBatchCommand {
 
         if ($argi < $argc && $pcb->valid_pid($argv[$argi])) {
             if (isset($arg["p"])) {
-                throw new CommandLineException("`-p` specified twice", $getopt);
+                throw new CommandLineException("`-p` specified twice", $clib->getopt);
             }
             $arg["p"] = $argv[$argi];
             ++$argi;
         }
         if (isset($arg["q"]) && isset($arg["p"])) {
-            throw new CommandLineException("`-q` conflicts with `-p`", $getopt);
+            throw new CommandLineException("`-q` conflicts with `-p`", $clib->getopt);
         } else if (isset($arg["p"])) {
             if (!$pcb->valid_pid($arg["p"])) {
-                throw new CommandLineException("Invalid `-p PID`", $getopt);
+                throw new CommandLineException("Invalid `-p PID`", $clib->getopt);
             }
             $pcb->p = stoi($arg["p"]);
         } else if ($pcb->delete) {
-            throw new CommandLineException("Missing `-p PID`", $getopt);
+            throw new CommandLineException("Missing `-p PID`", $clib->getopt);
         } else if (isset($arg["q"])) {
             $pcb->q = $arg["q"];
             $pcb->t = $arg["t"] ?? null;
         } else if (!$pcb->save) {
-            throw new CommandLineException("Missing `-p PID` or `-q SEARCH`", $getopt);
+            throw new CommandLineException("Missing `-p PID` or `-q SEARCH`", $clib->getopt);
         }
 
         if ($pcb->save) {
@@ -278,8 +261,8 @@ class Paper_CLIBatch implements CLIBatchCommand {
         return $pcb;
     }
 
-    static function register(Hotcrapi_Batch $clib, Getopt $getopt) {
-        $getopt->subcommand_description(
+    static function register(Hotcrapi_Batch $clib) {
+        $clib->getopt->subcommand_description(
             "paper",
             "Retrieve or change HotCRP submissions
 Usage: php batch/hotcrapi.php paper [PID | -q SEARCH]

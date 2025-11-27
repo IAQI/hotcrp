@@ -35,6 +35,8 @@ class Options_SettingParser extends SettingParser {
     private $_intermediate_ijmap;
     /** @var list<int> */
     private $_delete_optionids = [];
+    /** @var list<int> */
+    private $_delete_document_optionids = [];
     /** @var array<int,PaperOption> */
     private $_new_options = [];
     /** @var array<int,array<int,int>> */
@@ -330,7 +332,7 @@ class Options_SettingParser extends SettingParser {
                 MessageItem::marked_note("<5>Submitters must check this field before <span class=\"verb\">completing</span> their submissions.")
             ], ["class" => "hidden mt-1"]);
         }
-        $sv->print_close_control_group(["horizontal" => true]);
+        $sv->print_group_close(["horizontal" => true]);
     }
 
     function print_visibility(SettingValues $sv) {
@@ -350,7 +352,7 @@ class Options_SettingParser extends SettingParser {
             "fold_values" => ["review"]
         ]);
         echo '<div class="hint fx">The field will be visible to reviewers who have submitted a review, and to PC members who can see all reviews.</div>';
-        $sv->print_close_control_group(["horizontal" => true]);
+        $sv->print_group_close(["horizontal" => true]);
     }
 
     function print_display(SettingValues $sv) {
@@ -895,7 +897,6 @@ class Options_SettingParser extends SettingParser {
     // * If any non-title intrinsic field is reordered relative to the default,
     //   then all of them are
 
-    /** @return bool */
     private function _apply_req_sf(Si $si, SettingValues $sv) {
         if ($sv->has_req("options_version")
             && (int) $sv->reqstr("options_version") !== (int) $sv->conf->setting("options")) {
@@ -977,59 +978,65 @@ class Options_SettingParser extends SettingParser {
 
         // update settings database
         if ($sv->update("options", empty($nsfss) ? "" : json_encode_db($nsfss))) {
-            $this->_validate_consistency($sv);
             $sv->update("options_version", (int) $sv->conf->setting("options") + 1);
+            $sv->request_validate($si);
             $sv->request_store_value($si);
             $sv->mark_invalidate_caches(["options" => true]);
+            foreach ($this->_delete_optionids as $oid) {
+                if (($opt = $sv->conf->option_by_id($oid))
+                    && $opt->has_document()) {
+                    $this->_delete_document_optionids[] = $oid;
+                }
+            }
             if (!empty($this->_delete_optionids)
                 || !empty($this->_value_renumberings)) {
                 $sv->request_write_lock("PaperOption");
             }
+            if (!empty($this->_delete_document_optionids)) {
+                $sv->request_write_lock("PaperStorage");
+            }
         }
         $sv->save("ioptions", empty($insfss) ? "" : json_encode_db($insfss));
-        return true;
     }
 
-    private function _validate_consistency(SettingValues $sv) {
-        $old_oval = $sv->conf->setting("options");
-        $old_options = $sv->conf->setting_data("options");
-        if (($new_options = $sv->newv("options") ?? "") === "") {
-            $sv->conf->change_setting("options", null);
-        } else {
-            $sv->conf->change_setting("options", $old_oval + 1, $new_options);
-        }
-        $sv->conf->refresh_settings();
-
+    function validate(Si $si, SettingValues $sv) {
         foreach ($sv->cs()->members("__validate/submissionfields", "validate_function") as $gj) {
             $sv->cs()->call_function($gj, $gj->validate_function, $gj);
         }
-
-        $sv->conf->change_setting("options", $old_oval, $old_options);
-        $sv->conf->refresh_settings();
     }
 
     function apply_req(Si $si, SettingValues $sv) {
         if ($si->name === "sf") {
-            return $this->_apply_req_sf($si, $sv);
+            $this->_apply_req_sf($si, $sv);
+            return true;
         }
         assert($si->name0 === "sf/");
         $fs = $sv->oldv($si->name0 . $si->name1);
         if ($si->name2 === "/name") {
             $this->_apply_req_name($si, $fs, $sv);
-        } else if ($si->name2 === "/type") {
-            $this->_apply_req_type($si, $fs, $sv);
-        } else if ($si->name2 === "/values_text") {
-            $this->_apply_req_values_text($si, $fs, $sv);
-        } else if ($si->name2 === "/values") {
-            $this->_apply_req_values($si, $fs, $sv);
-        } else {
-            return false;
+            return true;
         }
+        if ($si->name2 === "/type") {
+            $this->_apply_req_type($si, $fs, $sv);
+            return true;
+        }
+        if ($si->name2 === "/values_text") {
+            $this->_apply_req_values_text($si, $fs, $sv);
+            return true;
+        }
+        if ($si->name2 === "/values") {
+            $this->_apply_req_values($si, $fs, $sv);
+            return true;
+        }
+        return false;
     }
 
     function store_value(Si $si, SettingValues $sv) {
         if (!empty($this->_delete_optionids)) {
             $sv->conf->qe("delete from PaperOption where optionId?a", $this->_delete_optionids);
+        }
+        if (!empty($this->_delete_document_optionids)) {
+            $sv->conf->qe("update PaperStorage set inactive=1 where documentType?a", $this->_delete_document_optionids);
         }
         foreach ($this->_value_renumberings as $oid => $renumberings) {
             $ndelete = 0;
