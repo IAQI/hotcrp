@@ -344,9 +344,13 @@ class Authors_PaperOption extends PaperOption {
         $ndigits = (int) ceil(log10($nau + 1));
 
         echo '<div class="papev">',
-            '<div id="authors:container" class="js-row-order need-row-order-autogrow" data-min-rows="', $min_authors, '"',
-            $this->max_count > 0 ? " data-max-rows=\"{$this->max_count}\"" : "",
-            ' data-row-counter-digits="', $ndigits,
+            '<div id="authors:container" class="need-row-order-autogrow';
+        if ($pt->has_editable_pc_conflicts()) {
+            echo ' uii js-update-potential-conflicts';
+        }
+        echo '" data-min-rows="', $min_authors,
+            $this->max_count > 0 ? "\" data-max-rows=\"{$this->max_count}" : "",
+            '" data-row-counter-digits="', $ndigits,
             '" data-row-template="authors:row-template">';
         for ($n = 1; $n <= $nau; ++$n) {
             $this->echo_editable_authors_line($pt, $n, $aulist[$n-1] ?? null, $reqaulist[$n-1] ?? null, $this->max_count !== 1);
@@ -355,6 +359,20 @@ class Authors_PaperOption extends PaperOption {
         echo '<template id="authors:row-template" class="hidden">';
         $this->echo_editable_authors_line($pt, '$', null, null, $this->max_count !== 1);
         echo "</template></div></fieldset>\n\n";
+    }
+    function print_web_edit_hidden(PaperTable $pt, $ov) {
+        echo '<fieldset name="authors" role="none" hidden>';
+        foreach (self::author_list($ov) as $i => $au) {
+            $n = $i + 1;
+            echo Ht::hidden("authors:{$n}:email", $au->email, ["disabled" => true]);
+            if (($n = $au->name(NAME_PARSABLE)) !== "") {
+                echo Ht::hidden("authors:{$n}:name", $n, ["disabled" => true]);
+            }
+            if ($au->affiliation !== "") {
+                echo Ht::hidden("authors:{$n}:affiliation", $au->affiliation, ["disabled" => true]);
+            }
+        }
+        echo '</fieldset>';
     }
 
     function field_fmt_context() {
@@ -368,19 +386,7 @@ class Authors_PaperOption extends PaperOption {
         }
         $names = ["<ul class=\"x namelist\">"];
         foreach (self::author_list($ov) as $au) {
-            $n = htmlspecialchars(trim("{$au->firstName} {$au->lastName}"));
-            $e = htmlspecialchars($au->email);
-            if ($e !== "") {
-                $e = "&lt;<a href=\"mailto:{$e}\" class=\"q\">{$e}</a>&gt;";
-            }
-            $t = ($n === "" ? $e : $n);
-            if ($au->affiliation !== "") {
-                $t .= " <span class=\"auaff\">(" . htmlspecialchars($au->affiliation) . ")</span>";
-            }
-            if ($n !== "" && $e !== "") {
-                $t .= " " . $e;
-            }
-            $names[] = "<li class=\"odname\">{$t}</li>";
+            $names[] = '<li class="odname">' . $au->name_h(NAME_E | NAME_A) . '</li>';
         }
         $names[] = "</ul>";
         $fr->set_html(join("", $names));

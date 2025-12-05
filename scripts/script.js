@@ -2440,6 +2440,20 @@ handle_ui.on("js-range-click", function (evt) {
     }
 });
 
+handle_ui.on("js-range-radio", function (evt) {
+    const f = this.form,
+        kind = this.getAttribute("data-range-type") || this.name;
+
+    // find checkboxes of this type
+    const cbs = [], cbisg = [], cbgs = [];
+    for (const e of f.querySelectorAll("input.js-range-radio:checked")) {
+        const tkind = e.getAttribute("data-range-type") || this.name;
+        if (kind === tkind && e !== this) {
+            e.checked = false;
+        }
+    }
+});
+
 $(function () {
     const time = now_msec();
     $(".is-range-group").each(function () {
@@ -2481,40 +2495,36 @@ handle_ui.on("js-range-combo", function () {
 
 // bubbles and tooltips
 var make_bubble = (function () {
+
 const ucdir = ["Top", "Right", "Bottom", "Left"],
     lcdir = ["top", "right", "bottom", "left"],
     szdir = ["height", "width"],
-    cssbc = ["borderTopColor", "borderRightColor", "borderBottomColor", "borderLeftColor"],
     SPACE = 8,
-    sizemap = {};
-
-function cssborder(dir, suffix) {
-    return "border" + ucdir[dir] + suffix;
-}
-
-var roundpixel = Math.round;
-if (window.devicePixelRatio && window.devicePixelRatio > 1)
-    roundpixel = (function (dpr) {
-        return function (x) { return Math.round(x * dpr) / dpr; };
-    })(window.devicePixelRatio);
+    sizemap = {},
+    dpr = window.devicePixelRatio || 1,
+    roundpixel = dpr > 1 ? x => Math.round(x * dpr) / dpr : Math.round;
 
 function to_rgba(c) {
-    var m = c.match(/^rgb\((.*)\)$/);
+    const m = c.match(/^rgb\((.*)\)$/);
     return m ? "rgba(" + m[1] + ", 1)" : c;
+}
+
+function cssfloat(s) {
+    const v = parseFloat(s);
+    return v === v ? v : 0;
 }
 
 function calculate_sizes(color) {
     if (!sizemap[color]) {
-        const et = $e("div", "bubtail bubtail0" + color),
+        const et = $e("div", "bubtail"),
             eb = $e("div", "bubble" + color, et);
         eb.hidden = true;
         document.body.appendChild(eb);
-        const ets = window.getComputedStyle(et), ebs = window.getComputedStyle(eb);
-        const sizes = {"0": parseFloat(ets.width), "1": parseFloat(ets.height)};
-        for (let ds = 0, x; ds < 4; ++ds) {
-            sizes[lcdir[ds]] = 0;
-            if ((x = ebs["margin" + ucdir[ds]]) && (x = parseFloat(x)))
-                sizes[lcdir[ds]] = x;
+        const ets = window.getComputedStyle(et),
+            ebs = window.getComputedStyle(eb),
+            sizes = {"0": parseFloat(ets.width), "1": parseFloat(ets.height)};
+        for (let ds = 0; ds < 4; ++ds) {
+            sizes[lcdir[ds]] = cssfloat(ebs[`margin${ucdir[ds]}`] || "0");
         }
         eb.remove();
         sizemap[color] = sizes;
@@ -2522,190 +2532,228 @@ function calculate_sizes(color) {
     return sizemap[color];
 }
 
-return function (content, bubopt) {
-    if (!bubopt && content && typeof content === "object") {
-        bubopt = content;
-        content = bubopt.content;
-    } else if (!bubopt)
-        bubopt = {};
-    else if (typeof bubopt === "string")
-        bubopt = {color: bubopt};
-    const container = bubopt.container || document.body;
-
-    var nearpos = null, dirspec = bubopt.anchor, dir = null,
-        color = bubopt.color ? " " + bubopt.color : "";
-
-    let bubdiv = $e("div", "bubble" + color,
-        $e("div", "bubtail bubtail0"),
-        $e("div", "bubcontent"),
-        $e("div", "bubtail bubtail1"));
-    bubdiv.setAttribute("style", "margin:0");
-    bubdiv.firstChild.setAttribute("style", "width:0;height:0");
-    bubdiv.lastChild.setAttribute("style", "width:0;height:0");
-    container.appendChild(bubdiv);
-    if (bubopt["pointer-events"]) {
-        $(bubdiv).css({"pointer-events": bubopt["pointer-events"]});
+function parse_dirspec(dirspec, pos) {
+    let res;
+    if (dirspec.length > pos
+        && (res = "0123trblnesw".indexOf(dirspec.charAt(pos))) >= 0) {
+        return res % 4;
     }
-    if (container !== document.body) {
-        bubdiv.style.position = "absolute";
+    return -1;
+}
+
+function csscornerradius(styles, corner, index) {
+    let divbr = styles[`border${corner}Radius`], pos;
+    if (!divbr) {
+        return 0;
     }
-    var bubch = bubdiv.childNodes;
-    var sizes = null;
-    var divbw = null;
+    if ((pos = divbr.indexOf(" ")) > -1) {
+        divbr = index ? divbr.substring(pos + 1) : divbr.substring(0, pos);
+    }
+    return cssfloat(divbr);
+}
 
-    function change_tail_direction() {
-        const bw = [0, 0, 0, 0], trw = sizes[1], trh = sizes[0] / 2,
-            divsty = window.getComputedStyle(bubdiv);
-        divbw = parseFloat(divsty[cssborder(dir, "Width")]);
-        divbw !== divbw && (divbw = 0); // eliminate NaN
-        bw[dir^1] = bw[dir^3] = trh + "px";
-        bw[dir^2] = trw + "px";
-        bubch[0].style.borderWidth = bw.join(" ");
-        bw[dir^1] = bw[dir^3] = trh + "px";
-        bw[dir^2] = trw + "px";
-        bubch[2].style.borderWidth = bw.join(" ");
+function constrainradius(styles, v, bpos, ds, sizes) {
+    let v0, v1;
+    if (ds & 1) {
+        v0 = csscornerradius(styles, ucdir[0] + ucdir[ds], 1);
+        v1 = csscornerradius(styles, ucdir[2] + ucdir[ds], 1);
+    } else {
+        v0 = csscornerradius(styles, ucdir[ds] + ucdir[3], 1);
+        v1 = csscornerradius(styles, ucdir[ds] + ucdir[1], 1);
+    }
+    return Math.min(Math.max(v, v0), bpos[szdir[(ds&1)^1]] - v1 - sizes[0]);
+}
 
-        for (let i = 1; i <= 3; ++i) {
-            bubch[0].style[lcdir[dir^i]] = bubch[2].style[lcdir[dir^i]] = "";
+function change_tail_direction(tail, bubsty, sizes, dir) {
+    const wx = sizes[dir&1], wy = sizes[(dir&1)^1],
+        bw = cssfloat(bubsty[`border${ucdir[dir]}Width`]),
+        wx1 = wx + (dir&1 ? bw : 0), wy1 = wy + (dir&1 ? 0 : bw);
+    let d;
+    if (dir === 0) {
+        d = `M0 ${wy1}L${wx/2} ${wy1-wy} ${wx} ${wy1}`;
+    } else if (dir === 1) {
+        d = `M0 0L${wx} ${wy/2} 0 ${wy}`;
+    } else if (dir === 2) {
+        d = `M0 0L${wx/2} ${wy} ${wx} 0`;
+    } else {
+        d = `M${wx1} 0L${wx1-wx} ${wy/2} ${wx1} ${wy}`;
+    }
+    const stroke = bubsty[`border${ucdir[dir]}Color`],
+        fill = to_rgba(bubsty.backgroundColor)
+            .replace(/([\d.]+)(?=\))/, (s, p1) => 0.75 * p1 + 0.25);
+    tail.replaceChildren($svg("svg",
+        {width: `${wx1}px`, height: `${wy1}px`, class: "d-block"},
+        $svg("path", {
+            d: d, stroke: stroke, fill: fill, "stroke-width": bw
+        })));
+    tail.style.width = `${wx1}px`;
+    tail.style.height = `${wy1}px`;
+    tail.style.top = tail.style.left = tail.style.top = tail.style.bottom = "";
+    if (dir & 1) {
+        tail.style[lcdir[dir]] = `${-wx1}px`;
+    } else {
+        tail.style[lcdir[dir]] = `${-wy1}px`;
+    }
+}
+
+function make_bubble(bubopts, buboptsx) {
+    if (typeof bubopts === "string") {
+        bubopts = {content: bubopts};
+    }
+    if (buboptsx) {
+        bubopts = Object.assign({}, bubopts,
+            typeof buboptsx === "string" ? {class: buboptsx} : buboptsx);
+    }
+
+    let color = bubopts.class || bubopts.color || "", dirspec = bubopts.anchor;
+    if (color !== "") {
+        color = " " + color;
+    }
+
+    let bubdiv = bubopts.element, bubdiv_temporary = !bubdiv;
+    if (bubdiv) {
+        if (!hasClass(bubdiv, "bubble")) {
+            throw new Error("bad bubble element");
         }
-        bubch[0].style[lcdir[dir]] = (-trw - divbw) + "px";
-        // Offset the inner triangle so that the border width in the diagonal
-        // part of the tail, is visually similar to the border width
-        var trdelta = (divbw / trh) * Math.sqrt(trw * trw + trh * trh);
-        bubch[2].style[lcdir[dir]] = (-trw - divbw + trdelta) + "px";
-
-        for (let i = 0; i < 3; i += 2) {
-            bubch[i].style.borderLeftColor = bubch[i].style.borderRightColor =
-            bubch[i].style.borderTopColor = bubch[i].style.borderBottomColor = "transparent";
+        if (!bubdiv.lastChild
+            || bubdiv.lastChild.nodeName !== "DIV"
+            || bubdiv.lastChild.className !== "bubtail") {
+            bubdiv.appendChild($e("div", {class: "bubtail", role: "none"}));
         }
-
-        bubch[0].style[cssbc[dir^2]] = divsty[cssbc[dir]];
-        bubch[2].style[cssbc[dir^2]] = to_rgba(divsty.backgroundColor).replace(/([\d.]+)\)/, function (s, p1) {
-            return (0.75 * p1 + 0.25) + ")";
-        });
+        if (bubdiv.childNodes.length !== 2
+            || bubdiv.firstChild.nodeName !== "DIV"
+            || !hasClass(bubdiv.firstChild, "bubcontent")) {
+            const content = $e("div", "bubcontent"),
+                tail = bubdiv.lastChild;
+            bubdiv.insertBefore(content, bubdiv.firstChild);
+            while (content.nextSibling !== tail) {
+                content.appendChild(content.nextSibling);
+            }
+        }
+        bubdiv.className = "bubble" + color;
+        bubdiv.style.marginLeft = bubdiv.style.marginRight = bubdiv.style.marginTop = bubdiv.style.marginBottom = "0";
+        if (bubopts["pointer-events"]) {
+            bubdiv.style.pointerEvents = bubopts["pointer-events"];
+        }
+        bubdiv.style.visibility = "hidden";
     }
 
-    function constrainmid(nearpos, wpos, ds, ds2) {
-        var z0 = nearpos[lcdir[ds]], z1 = nearpos[lcdir[ds^2]],
-            z = (1 - ds2) * z0 + ds2 * z1;
+    let nearpos = null, dir = null, sizes = null;
+
+    function ensure() {
+        if (!bubdiv) {
+            bubdiv = make_bubble.skeleton();
+            bubdiv.className = "bubble" + color;
+            if (bubopts["pointer-events"]) {
+                bubdiv.style.pointerEvents = bubopts["pointer-events"];
+            }
+            const container = bubopts.container || document.body;
+            container.appendChild(bubdiv);
+        }
+    }
+    ensure();
+
+    function constrainmid(nearpos, wpos, ds, tailfrac) {
+        const z0 = nearpos[lcdir[ds]], z1 = nearpos[lcdir[ds^2]];
+        let z = (1 - tailfrac) * z0 + tailfrac * z1;
         z = Math.max(z, Math.min(z1, wpos[lcdir[ds]] + SPACE));
         return Math.min(z, Math.max(z0, wpos[lcdir[ds^2]] - SPACE));
     }
 
-    function constrain(za, wpos, bpos, ds, ds2, noconstrain) {
-        var z0 = wpos[lcdir[ds]], z1 = wpos[lcdir[ds^2]],
-            bdim = bpos[szdir[ds&1]],
-            z = za - ds2 * bdim;
-        if (!noconstrain && z < z0 + SPACE)
+    function constrain(za, wpos, bpos, ds, tailfrac, noconstrain) {
+        const z0 = wpos[lcdir[ds]], z1 = wpos[lcdir[ds^2]], bdim = bpos[szdir[ds&1]];
+        let z = za - tailfrac * bdim;
+        if (!noconstrain && z < z0 + SPACE) {
             z = Math.min(za - sizes[0], z0 + SPACE);
-        else if (!noconstrain && z + bdim > z1 - SPACE)
+        } else if (!noconstrain && z + bdim > z1 - SPACE) {
             z = Math.max(za + sizes[0] - bdim, z1 - SPACE - bdim);
+        }
         return z;
     }
 
     function bpos_wconstraint(wpos, ds) {
-        var xw = Math.max(ds === 3 ? 0 : nearpos.left - wpos.left,
-                          ds === 1 ? 0 : wpos.right - nearpos.right);
-        if ((ds === "h" || ds === 1 || ds === 3) && xw > 100)
+        const xw = Math.max(ds === 3 ? 0 : nearpos.left - wpos.left,
+                            ds === 1 ? 0 : wpos.right - nearpos.right);
+        if ((ds === "h" || ds === 1 || ds === 3) && xw > 100) {
             return Math.min(wpos.width, xw) - 3*SPACE;
-        else
-            return wpos.width - 3*SPACE;
+        }
+        return wpos.width - 3*SPACE;
     }
 
     function make_bpos(wpos, ds) {
-        var $b = $(bubdiv);
-        $b.css("maxWidth", "");
-        var bg = $b.geometry(true);
-        var wconstraint = bpos_wconstraint(wpos, ds);
+        bubdiv.style.maxWidth = "";
+        let bg = $(bubdiv).geometry(true);
+        const wconstraint = bpos_wconstraint(wpos, ds);
         if (wconstraint < bg.width) {
-            $b.css("maxWidth", wconstraint);
-            bg = $b.geometry(true);
+            bubdiv.style.maxWidth = wconstraint + "px";
+            bg = $(bubdiv).geometry(true);
         }
         // bpos[D] is the furthest position in direction D, assuming
         // the bubble was placed on that side. E.g., bpos[0] is the
         // top of the bubble, assuming the bubble is placed over the
         // reference.
-        var bpos = [nearpos.top - sizes.bottom - bg.height - sizes[0],
-                    nearpos.right + sizes.left + bg.width + sizes[0],
-                    nearpos.bottom + sizes.top + bg.height + sizes[0],
-                    nearpos.left - sizes.right - bg.width - sizes[0]];
-        bpos.width = bg.width;
-        bpos.height = bg.height;
-        bpos.wconstraint = wconstraint;
-        return bpos;
+        return {
+            "0": nearpos.top - sizes.bottom - bg.height - sizes[0],
+            "1": nearpos.right + sizes.left + bg.width + sizes[0],
+            "2": nearpos.bottom + sizes.top + bg.height + sizes[0],
+            "3": nearpos.left - sizes.right - bg.width - sizes[0],
+            width: bg.width,
+            height: bg.height,
+            wconstraint: wconstraint
+        };
     }
 
     function remake_bpos(bpos, wpos, ds) {
-        var wconstraint = bpos_wconstraint(wpos, ds);
+        const wconstraint = bpos_wconstraint(wpos, ds);
         if ((wconstraint < bpos.wconstraint && wconstraint < bpos.width)
-            || (wconstraint > bpos.wconstraint && bpos.width >= bpos.wconstraint))
+            || (wconstraint > bpos.wconstraint && bpos.width >= bpos.wconstraint)) {
             bpos = make_bpos(wpos, ds);
+        }
         return bpos;
     }
 
-    function parse_dirspec(dirspec, pos) {
-        var res;
-        if (dirspec.length > pos
-            && (res = "0123trblnesw".indexOf(dirspec.charAt(pos))) >= 0)
-            return res % 4;
-        return -1;
-    }
-
-    function csscornerradius(corner, index) {
-        var divbr = $(bubdiv).css("border" + corner + "Radius"), pos;
-        if (!divbr)
-            return 0;
-        if ((pos = divbr.indexOf(" ")) > -1)
-            divbr = index ? divbr.substring(pos + 1) : divbr.substring(0, pos);
-        return parseFloat(divbr);
-    }
-
-    function constrainradius(x, bpos, ds) {
-        var x0, x1;
-        if (ds & 1) {
-            x0 = csscornerradius(ucdir[0] + ucdir[ds], 1);
-            x1 = csscornerradius(ucdir[2] + ucdir[ds], 1);
-        } else {
-            x0 = csscornerradius(ucdir[ds] + ucdir[3], 1);
-            x1 = csscornerradius(ucdir[ds] + ucdir[1], 1);
-        }
-        return Math.min(Math.max(x, x0), bpos[szdir[(ds&1)^1]] - x1 - sizes[0]);
-    }
-
     function show() {
-        if (!sizes)
+        ensure();
+        bubdiv.hidden = false;
+        if (!sizes) {
             sizes = calculate_sizes(color);
+        }
 
         // parse dirspec
-        if (dirspec == null)
+        if (dirspec == null) {
             dirspec = "r";
-        var noflip = /!/.test(dirspec),
+        }
+        dirspec = dirspec.toString();
+        let noflip = /!/.test(dirspec),
             noconstrain = /\*/.test(dirspec),
             dsx = dirspec.replace(/[^a0-3neswtrblhv]/, ""),
             ds = parse_dirspec(dsx, 0),
-            ds2 = parse_dirspec(dsx, 1);
-        if (ds >= 0 && ds2 >= 0 && (ds2 & 1) != (ds & 1))
-            ds2 = (ds2 === 1 || ds2 === 2 ? 1 : 0);
-        else
-            ds2 = 0.5;
-        if (ds < 0)
+            tailfrac = parse_dirspec(dsx, 1);
+        if (ds >= 0 && tailfrac >= 0 && (tailfrac & 1) != (ds & 1)) {
+            tailfrac = (tailfrac === 1 || tailfrac === 2 ? 1 : 0);
+        } else {
+            tailfrac = 0.5;
+        }
+        if (ds < 0) {
             ds = /^[ahv]$/.test(dsx) ? dsx : "a";
+        }
 
-        var wpos = $(window).geometry();
-        $(bubdiv).css({maxWidth: "", left: "", top: ""});
-        var bpos = make_bpos(wpos, dsx);
+        const wpos = $(window).geometry();
+        bubdiv.style.maxWidth = bubdiv.style.left = bubdiv.style.top = "";
+        let bpos = make_bpos(wpos, dsx);
 
         if (ds === "a") {
             if (bpos.height + sizes[0] > Math.max(nearpos.top - wpos.top, wpos.bottom - nearpos.bottom)) {
                 ds = "h";
                 bpos = remake_bpos(bpos, wpos, ds);
-            } else
+            } else {
                 ds = "v";
+            }
         }
 
-        var wedge = [wpos.top + 3*SPACE, wpos.right - 3*SPACE,
-                     wpos.bottom - 3*SPACE, wpos.left + 3*SPACE];
-        if ((ds === "v" || ds === 0 || ds === 2) && !noflip && ds2 < 0
+        const wedge = [wpos.top + 3*SPACE, wpos.right - 3*SPACE,
+                       wpos.bottom - 3*SPACE, wpos.left + 3*SPACE];
+        if ((ds === "v" || ds === 0 || ds === 2) && !noflip && tailfrac < 0
             && bpos[2] > wedge[2] && bpos[0] < wedge[0]
             && (bpos[3] >= wedge[3] || bpos[1] <= wedge[1])) {
             ds = "h";
@@ -2714,67 +2762,93 @@ return function (content, bubopt) {
         if ((ds === "v" && bpos[2] > wedge[2] && bpos[0] > wedge[0])
             || (ds === 0 && !noflip && bpos[2] > wpos.bottom
                 && wpos.top - bpos[0] < bpos[2] - wpos.bottom)
-            || (ds === 2 && (noflip || bpos[0] >= wpos.top + SPACE)))
+            || (ds === 2 && (noflip || bpos[0] >= wpos.top + SPACE))) {
             ds = 2;
-        else if (ds === "v" || ds === 0 || ds === 2)
+        } else if (ds === "v" || ds === 0 || ds === 2) {
             ds = 0;
-        else if ((ds === "h" && bpos[3] - wpos.left < wpos.right - bpos[1])
-                 || (ds === 1 && !noflip && bpos[3] < wpos.left)
-                 || (ds === 3 && (noflip || bpos[1] <= wpos.right - SPACE)))
+        } else if ((ds === "h" && bpos[3] - wpos.left < wpos.right - bpos[1])
+                   || (ds === 1 && !noflip && bpos[3] < wpos.left)
+                   || (ds === 3 && (noflip || bpos[1] <= wpos.right - SPACE))) {
             ds = 3;
-        else
+        } else {
             ds = 1;
+        }
         bpos = remake_bpos(bpos, wpos, ds);
 
+        const bubsty = window.getComputedStyle(bubdiv);
         if (ds !== dir) {
             dir = ds;
-            change_tail_direction();
+            change_tail_direction(bubdiv.lastChild, bubsty, sizes, dir);
         }
 
-        var x, y, xa, ya, d, bubsty = window.getComputedStyle(bubdiv);
-        var divbw = parseFloat(bubsty[cssborder(ds & 1 ? 0 : 3, "Width")]);
+        let x, y, xa, ya;
         if (ds & 1) {
-            ya = constrainmid(nearpos, wpos, 0, ds2);
-            y = constrain(ya, wpos, bpos, 0, ds2, noconstrain);
-            d = constrainradius(roundpixel(ya - y - sizes[0] / 2 - divbw), bpos, ds);
-            bubch[0].style.top = bubch[2].style.top = d + "px";
-
-            if (ds == 1)
-                x = nearpos.left - sizes.right - bpos.width - sizes[1] - 1;
-            else
+            ya = constrainmid(nearpos, wpos, 0, tailfrac);
+            y = constrain(ya, wpos, bpos, 0, tailfrac, noconstrain);
+            if (ds === 1) {
+                x = nearpos.left - sizes.right - bpos.width - sizes[1];
+            } else {
                 x = nearpos.right + sizes.left + sizes[1];
+            }
         } else {
-            xa = constrainmid(nearpos, wpos, 3, ds2);
-            x = constrain(xa, wpos, bpos, 3, ds2, noconstrain);
-            d = constrainradius(roundpixel(xa - x - sizes[0] / 2 - divbw), bpos, ds);
-            bubch[0].style.left = bubch[2].style.left = d + "px";
-
-            if (ds == 0)
+            xa = constrainmid(nearpos, wpos, 3, tailfrac);
+            x = constrain(xa, wpos, bpos, 3, tailfrac, noconstrain);
+            if (ds === 0) {
                 y = nearpos.bottom + sizes.top + sizes[1];
-            else
-                y = nearpos.top - sizes.bottom - bpos.height - sizes[1] - 1;
+            } else {
+                y = nearpos.top - sizes.bottom - bpos.height - sizes[1];
+            }
         }
 
+        let dx = 0, dy = 0;
+        const container = bubdiv.parentElement;
         if (bubsty.position === "fixed" || container !== document.body) {
-            x -= window.scrollX;
-            y -= window.scrollY;
+            dx -= window.scrollX;
+            dy -= window.scrollY;
         }
-        if (container !== document.body) {
+        if (bubsty.position !== "fixed" && container !== document.body) {
             const cg = $(container).geometry();
-            x += container.scrollLeft - cg.x;
-            y += container.scrollTop - cg.y;
+            dx -= cg.x - container.scrollLeft;
+            dy -= cg.y - container.scrollTop;
         }
-        bubdiv.style.left = roundpixel(x) + "px";
-        bubdiv.style.top = roundpixel(y) + "px";
+        x = roundpixel(x + dx);
+        y = roundpixel(y + dy);
+
+        let d;
+        if (ds & 1) {
+            d = ya + dy - y - cssfloat(bubsty.borderTopWidth) - sizes[0]/2;
+        } else {
+            d = xa + dx - x - cssfloat(bubsty.borderLeftWidth) - sizes[0]/2;
+        }
+        bubdiv.lastChild.style[lcdir[ds&1?0:3]] = constrainradius(bubsty, d, bpos, ds, sizes) + "px";
+
+        bubdiv.style.left = x + "px";
+        bubdiv.style.top = y + "px";
         bubdiv.style.visibility = "visible";
+        bubdiv.hidden = false;
     }
 
     function remove() {
-        bubdiv && bubdiv.parentElement.removeChild(bubdiv);
-        bubdiv = null;
+        if (bubdiv && bubdiv_temporary) {
+            bubdiv.remove();
+            bubdiv = null;
+        } else if (bubdiv) {
+            bubdiv.hidden = true;
+        }
     }
 
-    var bubble = {
+    function reclass(newcolor) {
+        newcolor = newcolor ? " " + newcolor : "";
+        if (color !== newcolor) {
+            color = newcolor;
+            bubdiv.className = "bubble" + color;
+            dir = sizes = null;
+            nearpos && show();
+        }
+        return bubble;
+    }
+
+    const bubble = {
         near: function (epos, reference) {
             if (typeof epos === "string" || epos.tagName || epos.jquery) {
                 epos = $(epos);
@@ -2805,23 +2879,14 @@ return function (content, bubopt) {
             return bubble;
         },
         remove: remove,
-        color: function (newcolor) {
-            newcolor = newcolor ? " " + newcolor : "";
-            if (color !== newcolor) {
-                color = newcolor;
-                bubdiv.className = "bubble" + color;
-                bubch[0].className = "bubtail bubtail0" + color;
-                bubch[2].className = "bubtail bubtail1" + color;
-                dir = sizes = null;
-                nearpos && show();
-            }
-            return bubble;
-        },
+        className: reclass,
+        color: reclass,
         html: function (content) {
-            var n = bubch[1];
             if (content === undefined) {
-                return n.innerHTML;
+                return bubdiv ? bubdiv.firstChild.innerHTML : "";
             }
+            ensure();
+            const n = bubdiv.firstChild;
             if (typeof content === "string"
                 && content === n.innerHTML
                 && bubdiv.style.visibility === "visible") {
@@ -2840,15 +2905,16 @@ return function (content, bubopt) {
         },
         text: function (text) {
             if (text === undefined) {
-                return $(bubch[1]).text();
+                return bubdiv ? bubdiv.firstChild.textContent : "";
             }
             return bubble.replace_content(text);
         },
         content_node: function () {
-            return bubch[1];
+            return bubdiv.firstChild;
         },
         replace_content: function (...es) {
-            bubch[1].replaceChildren(...es);
+            ensure();
+            bubdiv.firstChild.replaceChildren(...es);
             nearpos && show();
             return bubble;
         },
@@ -2858,23 +2924,37 @@ return function (content, bubopt) {
             return bubble;
         },
         removeOn: function (jq, evt) {
-            if (arguments.length > 1)
+            if (arguments.length > 1) {
                 $(jq).on(evt, remove);
-            else if (bubdiv)
+            } else if (bubdiv) {
                 $(bubdiv).on(jq, remove);
+            }
             return bubble;
         },
+        element: function () {
+            return bubdiv;
+        },
         self: function () {
-            return bubdiv ? $(bubdiv) : null;
+            return $(bubdiv);
         },
         outerHTML: function () {
             return bubdiv ? bubdiv.outerHTML : null;
         }
     };
 
-    content && bubble.html(content);
+    if (bubopts.content) {
+        bubble.html(bubopts.content);
+    }
     return bubble;
+}
+
+make_bubble.skeleton = function () {
+    return $e("div", {class: "bubble", style: "margin:0", role: "tooltip", hidden: true},
+        $e("div", "bubcontent"),
+        $e("div", {class: "bubtail", role: "none"}));
 };
+
+return make_bubble;
 })();
 
 
@@ -2907,9 +2987,16 @@ function prepare_info(elt, info) {
     }
     if (elt.hasAttribute("data-tooltip")) {
         info.content = elt.getAttribute("data-tooltip");
-    } else if (info.content == null && elt.hasAttribute("aria-label")) {
+    } else if (info.content != null) {
+        // leave alone
+    } else if (elt.hasAttribute("aria-describedby")
+               && elt.ariaDescribedByElements
+               && elt.ariaDescribedByElements.length === 1
+               && hasClass(elt.ariaDescribedByElements[0], "bubble")) {
+        info.contentElement = elt.ariaDescribedByElements[0];
+    } else if (elt.hasAttribute("aria-label")) {
         info.content = elt.getAttribute("aria-label");
-    } else if (info.content == null && elt.hasAttribute("title")) {
+    } else if (elt.hasAttribute("title")) {
         info.content = elt.getAttribute("title");
     }
     return info;
@@ -2922,13 +3009,16 @@ function show_tooltip(info) {
 
     const self = this;
     info = prepare_info(self, $.extend({}, info || {}));
-    info.element = this;
 
-    let tt, bub = null, to = null, near = null,
-        refcount = 0, content = info.content;
+    let bub = null, to = null, refcount = 0;
 
     function close() {
         to = clearTimeout(to);
+        if (bub) {
+            bub.element().removeEventListener("pointerenter", tt.enter);
+            bub.element().removeEventListener("pointerleave", tt.leave);
+            bub.remove();
+        }
         bub && bub.remove();
         tooltip_map.delete(self);
         if (global_tooltip === tt) {
@@ -2936,72 +3026,72 @@ function show_tooltip(info) {
         }
     }
 
-    function show_bub() {
-        if (content && !bub) {
-            bub = make_bubble(content, {color: "tooltip ".concat(info.className, info.type === "focus" ? " position-absolute" : ""), anchor: info.anchor});
-            near = info.near || info.element;
-            bub.near(near).hover(tt.enter, tt.exit);
-        } else if (content) {
-            bub.html(content);
-        } else if (bub) {
-            bub && bub.remove();
-            bub = near = null;
-        }
-    }
-
-    function complete(new_content) {
-        if (new_content instanceof HPromise) {
-            new_content.then(complete);
-            return;
-        }
-        let tx = global_tooltip;
-        content = new_content;
-        if (tx
-            && tx._element === info.element
-            && tx.html() === content
-            && !info.done) {
-            tt = tx;
-        } else {
-            tx && tx.close();
-            tooltip_map.set(self, tt);
-            show_bub();
-            global_tooltip = tt;
-        }
-    }
-
-    tt = {
+    let tt = {
         enter: function () {
             to = clearTimeout(to);
             ++refcount;
             return tt;
         },
-        exit: function () {
-            var delay = info.type === "focus" ? 0 : 200;
+        leave: function () {
+            const delay = info.type === "focus" ? 0 : 200;
             to = clearTimeout(to);
-            if (--refcount == 0 && info.type !== "sticky") {
+            if (--refcount === 0 && info.type !== "sticky") {
                 to = setTimeout(close, delay);
             }
             return tt;
         },
         close: close,
-        _element: self,
-        html: function (new_content) {
-            if (new_content === undefined) {
-                return content;
-            }
-            content = new_content;
-            show_bub();
-            return tt;
-        },
-        text: function (new_text) {
-            return tt.html(escape_html(new_text));
+        owner: function () {
+            return self;
         },
         near: function () {
-            return near;
+            return info.near || self;
+        },
+        bubbleElement: function () {
+            return bub ? bub.element() : null;
         }
     };
 
-    complete(content);
+    function complete(content) {
+        if (content instanceof HPromise) {
+            content.then(complete);
+            return;
+        }
+
+        let tx = global_tooltip;
+        if (tx
+            && tx.owner() === info.element
+            && (info.contentElement
+                ? info.contentElement === tx.bubbleElement()
+                : content === tx.html())
+            && !info.done) {
+            tt = tx;
+            return;
+        }
+        if (tx) {
+            tx.close();
+            tx = null;
+        }
+
+        const bubinfo = {class: `tooltip ${info.className}`, anchor: info.anchor};
+        if (info.type === "focus") {
+            bubinfo.class += " position-absolute";
+        }
+        if (info.contentElement) {
+            bubinfo.element = info.contentElement;
+        } else if (content) {
+            bubinfo.content = content;
+        } else {
+            return;
+        }
+
+        tooltip_map.set(self, tt);
+        bub = make_bubble(bubinfo).near(info.near || self);
+        bub.element().addEventListener("pointerenter", tt.enter);
+        bub.element().addEventListener("pointerleave", tt.leave);
+        global_tooltip = tt;
+    }
+    complete(info.content);
     info.done = true;
     return tt;
 }
@@ -3013,25 +3103,54 @@ function ttenter() {
 
 function ttleave() {
     const tt = tooltip_map.get(this);
-    tt && tt.exit();
+    tt && tt.leave();
 }
 
 function tooltip() {
     removeClass(this, "need-tooltip");
-    if (this.getAttribute("data-tooltip-type") === "focus")
-        $(this).on("focus", ttenter).on("blur", ttleave);
-    else
-        $(this).hover(ttenter, ttleave);
+    const tt = this.getAttribute("data-tooltip-type");
+    if (tt === "within") {
+        tooltip_within(this);
+    } else {
+        this.addEventListener("focusin", ttenter);
+        this.addEventListener("focusout", ttleave);
+        if (tt !== "focus") {
+            this.addEventListener("pointerenter", ttenter);
+            this.addEventListener("pointerleave", ttleave);
+        }
+    }
 }
+
+function tooltip_within(elt) {
+    const info = prepare_info(elt, {});
+    function enter(evt) {
+        const wte = evt.target.closest(".want-tooltip");
+        if (wte) {
+            const tt = tooltip_map.get(wte) || show_tooltip.call(wte, info);
+            tt && tt.enter();
+        }
+    }
+    function leave(evt) {
+        const wte = evt.target.closest(".want-tooltip");
+        wte && ttleave.call(wte);
+    }
+    elt.addEventListener("mouseover", enter);
+    elt.addEventListener("mouseout", leave);
+    elt.addEventListener("focusin", enter);
+    elt.addEventListener("focusout", leave);
+}
+
 tooltip.close = function (e) {
     const tt = e ? tooltip_map.get(e) : global_tooltip;
     tt && tt.close();
 };
+
 tooltip.close_under = function (e) {
     if (global_tooltip && e.contains(global_tooltip.near())) {
         global_tooltip.close();
     }
 };
+
 tooltip.add_builder = function (name, f) {
     builders[name] = f;
 };
@@ -3050,14 +3169,16 @@ HtmlCollector.prototype.push = function (open, close) {
         this.close.push(close);
         this.html = "";
         return this.open.length - 1;
-    } else
+    } else {
         this.html += open;
+    }
     return this;
 };
 HtmlCollector.prototype.pop = function (pos) {
     var n = this.open.length;
-    if (pos == null)
+    if (pos == null) {
         pos = Math.max(0, n - 1);
+    }
     while (n > pos) {
         --n;
         this.html = this.open[n] + this.html + this.close[n];
@@ -3089,11 +3210,15 @@ HtmlCollector.prototype.clear = function () {
     return this;
 };
 HtmlCollector.next_input_id = (function () {
-var id = 1;
-return function () {
-    var s;
+let id = 1;
+return function (pfx) {
+    if (pfx && !document.getElementById(pfx)) {
+        return pfx;
+    }
+    pfx = pfx || "k-";
+    let s;
     do {
-        s = "k-" + id++;
+        s = pfx + id++;
     } while (document.getElementById(s));
     return s;
 };
@@ -3327,9 +3452,8 @@ function form_submitter(form, evt) {
     } else if (form.hotcrpSubmitter
                && form.hotcrpSubmitter[1] >= (new Date).getTime() - 10) {
         return form.hotcrpSubmitter[0];
-    } else {
-        return null;
     }
+    return null;
 }
 
 handle_ui.on("js-mark-submit", function () {
@@ -3409,6 +3533,19 @@ return {
     }
 };
 })(jQuery);
+
+
+// alerts
+handle_ui.on("js-dismiss-alert", function (evt) {
+    const self = this;
+    this.disabled = true;
+    $.ajax(hoturl("=api/dismissalert", {alertid: this.getAttribute("data-alertid")}), {
+        method: "POST", success: function (data) {
+            if (data.ok)
+                self.closest(".msg").remove();
+        }
+    });
+});
 
 
 // initialization and tracker
@@ -4582,22 +4719,7 @@ function $svg(tag, attr) {
     return e;
 }
 
-function svge() {
-    var e = document.createElementNS("http://www.w3.org/2000/svg", arguments[0]), i, t;
-    for (i = 1; i < arguments.length; ) {
-        t = arguments[i];
-        if (typeof t === "string") {
-            e.setAttribute(t, arguments[i + 1]);
-            i += 2;
-        } else {
-            e.append(t);
-            ++i;
-        }
-    }
-    return e;
-}
-
-function svge_use_licon(name) {
+function $svg_use_licon(name) {
     return $svg("svg", {class: "licon", width: "1em", height: "1em", viewBox: "0 0 64 64", preserveAspectRatio: "none"},
         $svg("use", {href: "#i-def-" + name}));
 }
@@ -5308,7 +5430,7 @@ handle_ui.on("js-bulkassign-action", function () {
 });
 
 (function () {
-var email_info = [], email_info_at = 0;
+let searches = [], searches_at = 0;
 
 function populate(e, v, placeholder) {
     if (placeholder) {
@@ -5331,8 +5453,9 @@ handle_ui.on("input.js-email-populate", function () {
     if (!f) {
         return;
     }
-    let v = self.value.toLowerCase().trim(),
-        fn = null, ln = null, nn = null, af = null,
+
+    const v = self.value.toLowerCase().trim();
+    let fn = null, ln = null, nn = null, af = null,
         country = null, orcid = null, placeholder = false, idx;
     if (this.name === "email" || this.name === "uemail") {
         fn = f.elements.firstName;
@@ -5355,24 +5478,25 @@ handle_ui.on("input.js-email-populate", function () {
 
     function success(data) {
         data = data || {};
-        if (data.match || (data.ok && !data.email)) {
+        if (data.ok && !data._search) {
+            data._search = v;
             if (data.email) {
                 data.lemail = data.email.toLowerCase();
-            } else {
+            } else if (data.match === false) {
                 data.lemail = v + "~";
+            } else {
+                data.lemail = v; // search only matches itself
             }
-            if (!email_info.length) {
-                email_info_at = now_sec();
+            if (searches.length === 0) {
+                searches_at = now_sec();
             }
             let i = 0;
-            while (i !== email_info.length && email_info[i] !== v) {
-                i += 2;
+            while (i !== searches.length && searches[i]._search !== v) {
+                ++i;
             }
-            if (i === email_info.length) {
-                email_info.push(v, data);
-            }
+            searches[i] = data;
         }
-        if (!data.match) {
+        if (v !== data.lemail) {
             data = {};
         }
         if (self.value.trim() !== v
@@ -5403,16 +5527,16 @@ handle_ui.on("input.js-email-populate", function () {
         success(null);
         return;
     }
-    if ((email_info_at && now_sec() - email_info_at >= 3600)
-        || email_info.length > 200) {
-        email_info = [];
+    if ((searches_at && now_sec() - searches_at >= 3600)
+        || searches.length > 200) {
+        searches = [];
     }
     let i = 0;
-    while (i !== email_info.length
-           && (v < email_info[i] || v > email_info[i + 1].lemail)) {
-        i += 2;
+    while (i !== searches.length
+           && (v < searches[i]._search || v > searches[i].lemail)) {
+        ++i;
     }
-    if (i === email_info.length) {
+    if (i === searches.length) {
         let args = {email: v};
         if (hasClass(this, "want-potential-conflict")) {
             args.potential_conflict = 1;
@@ -5421,8 +5545,8 @@ handle_ui.on("input.js-email-populate", function () {
         $.ajax(hoturl("=api/user", args), {
             method: "GET", success: success
         });
-    } else if (v === email_info[i + 1].lemail) {
-        success(email_info[i + 1]);
+    } else if (v === searches[i].lemail) {
+        success(searches[i]);
     } else {
         success(null);
     }
@@ -5809,6 +5933,7 @@ function row_order_drag_confirm(group, defaults) {
         row_fill(row, i, defaults, changes);
     }
     row_order_autogrow(group, defaults);
+    $(changes).trigger("input");
     $(changes).trigger("change");
 }
 
@@ -5994,7 +6119,7 @@ function minifeedback(e, rv) {
         addClass(e, status > 1 ? "has-error" : "has-warning");
     }
     if (ul.firstChild) {
-        make_bubble(ul, status > 1 ? "errorbubble" : "warningbubble").near(e).removeOn(e, "input change click hide" + (status > 1 ? "" : " focus blur"));
+        make_bubble({content: ul, class: status > 1 ? "errorbubble" : "warningbubble"}).near(e).removeOn(e, "input change click hide" + (status > 1 ? "" : " focus blur"));
     }
 
     let ctr, prev = null;
@@ -6318,87 +6443,63 @@ hotcrp.tooltip.add_builder("rf-score", function (info) {
     return info;
 });
 
-hotcrp.tooltip.add_builder("rf-description", function (info) {
-    var rv = $(this).closest(".rf");
-    if (rv.length) {
-        var fieldj = formj[rv.data("rf")];
-        if (fieldj && (fieldj.description || fieldj.values)) {
-            var d = "";
-            if (fieldj.description) {
-                if (/<(?:p|div|table)/i.test(fieldj.description))
-                    d += fieldj.description;
-                else
-                    d += "<p>" + fieldj.description + "</p>";
-            }
-            if (fieldj.values) {
-                d += "<div class=\"od\">Choices are:</div>";
-                fieldj.each_value(function (fv) {
-                    d = d.concat('<div class="od"><strong class="sv ', fv.className, '">', fv.symbol, fv.sp1, '</strong>', fv.sp2, escape_html(fv.title), '</div>');
-                });
-            }
-            info = $.extend({content: d, anchor: "w"}, info);
-        }
-    }
-    return info;
-});
-
-function score_header_tooltips($j) {
-    $j.find(".rf .field-title").attr("data-tooltip-info", "rf-description")
-        .each(hotcrp.tooltip);
-}
-
 function field_visible(f, rrow) {
     return rrow[f.uid] != null && rrow[f.uid] !== "";
 }
 
 function render_review_body_in(rrow, bodye) {
-    var foidx = 0, f, x, nextf, last_display = 0, display, fe, h3, e;
+    let foidx = 0, nextf, last_display = 0;
     for (foidx = 0; (nextf = form_order[foidx]) && !field_visible(nextf, rrow); ++foidx) {
     }
     while (nextf) {
-        f = nextf;
+        const f = nextf;
         for (++foidx; (nextf = form_order[foidx]) && !field_visible(nextf, rrow); ++foidx) {
         }
 
-        if (last_display != 1 && f.type !== "text" && nextf && nextf.type !== "text") {
-            display = 1;
-        } else {
-            display = last_display == 1 ? 2 : 0;
+        let display = 1;
+        if (last_display === 1 || f.type === "text" || !nextf || nextf.type === "text") {
+            display = last_display === 1 ? 2 : 0;
         }
 
-        fe = document.createElement("div");
+        const fe = document.createElement("div");
         fe.className = "rf rfd" + display;
         fe.setAttribute("data-rf", f.uid);
         bodye.appendChild(fe);
 
-        e = document.createElement("span");
-        e.className = "field-title";
-        e.append(f.name);
-        h3 = document.createElement("h3");
-        h3.className = "rfehead";
-        h3.appendChild(e);
-        x = f.visibility || "re";
-        if (x === "audec" && hotcrp.status && hotcrp.status.myperm
-            && hotcrp.status.myperm.some_author_can_view_decision) {
-            x = "au";
+        const fte = document.createElement("span");
+        fte.className = "field-title";
+        fte.append(f.name);
+        const ttid = f.tooltip_id();
+        if (ttid) {
+            addClass(fte, "need-tooltip");
+            fte.setAttribute("data-tooltip-anchor", "w");
+            fte.setAttribute("aria-describedby", ttid);
         }
-        if (x !== "au") {
-            e = document.createElement("div");
-            e.className = "field-visibility";
-            x = ({
+        const h3 = document.createElement("h3");
+        h3.className = "rfehead";
+        h3.appendChild(fte);
+        let vis = f.visibility || "re";
+        if (vis === "audec" && hotcrp.status && hotcrp.status.myperm
+            && hotcrp.status.myperm.some_author_can_view_decision) {
+            vis = "au";
+        }
+        if (vis !== "au") {
+            const vise = document.createElement("div");
+            vise.className = "field-visibility";
+            const vistext = ({
                 secret: "secret",
                 admin: "shown only to administrators",
                 re: "hidden from authors",
                 audec: "hidden from authors until decision",
                 pconly: "hidden from authors and external reviewers"
-            })[x] || x;
-            e.append("(" + x + ")");
-            h3.appendChild(e);
+            })[vis] || vis;
+            vise.append("(" + vistext + ")");
+            h3.appendChild(vise);
         }
-        e = document.createElement("div");
-        e.className = "revvt";
-        e.appendChild(h3);
-        fe.appendChild(e);
+        const vte = document.createElement("div");
+        vte.className = "revvt";
+        vte.appendChild(h3);
+        fe.appendChild(vte);
 
         f.render_in(rrow[f.uid], rrow, fe);
 
@@ -6760,7 +6861,7 @@ hotcrp.add_review = function (rrow) {
     // complete render
     earticle.append(eheader, ebody);
     document.querySelector(".pcontainer").append(earticle);
-    score_header_tooltips($(earticle));
+    $(earticle).awaken();
     navsidebar.set("r" + rid, rdesc);
 };
 
@@ -6808,6 +6909,33 @@ ReviewField.prototype.render_in = function (fv, rrow, fe) {
     fe.appendChild(e);
     render_text.onto(e, rrow.format, fv);
 }
+
+ReviewField.prototype.tooltip_id = function () {
+    if (!this.description && !this.values) {
+        return null;
+    } else if (this._tooltip_id) {
+        return this._tooltip_id;
+    }
+    const bubdiv = make_bubble.skeleton();
+    bubdiv.id = this._tooltip_id = `d-rf-${this.uid}`;
+    let d = "";
+    if (this.description) {
+        if (/<(?:p|div|table)/i.test(this.description)) {
+            d += this.description;
+        } else {
+            d += `<p>${this.description}</p>`;
+        }
+    }
+    if (this.values) {
+        d += "<div class=\"od\">Choices are:</div>";
+        this.each_value(function (fv) {
+            d += `<div class="od"><strong class="sv ${fv.className}">${fv.symbol}${fv.sp1}</strong>${fv.sp2}${escape_html(fv.title)}</div>`;
+        });
+    }
+    bubdiv.firstChild.innerHTML = d;
+    document.body.appendChild(bubdiv);
+    return this._tooltip_id;
+};
 
 function DiscreteValues_ReviewField(fj) {
     var i, n, step, sym, ch;
@@ -7255,14 +7383,14 @@ function cmt_render_form_prop(cj, cid, btnbox) {
 
     // attachments
     einfo.append($e("div", {id: cid + "-attachments", class: "entryi has-editable-attachments hidden", "data-dt": -2, "data-document-prefix": "attachment"}, $e("span", "label", "Attachments")));
-    btnbox.append($e("button", {type: "button", name: "attach", class: "btn-licon need-tooltip ui js-add-attachment", "aria-label": "Attach file", "data-editable-attachments": cid + "-attachments"}, svge_use_licon("attachment")));
+    btnbox.append($e("button", {type: "button", name: "attach", class: "btn-licon need-tooltip ui js-add-attachment", "aria-label": "Attach file", "data-editable-attachments": cid + "-attachments"}, $svg_use_licon("attachment")));
 
     // tags
     if (!cj.response && !cj.by_author) {
         einfo.append($e("div", "entryi fx3",
             $e("label", {for: cid + "-tags"}, "Tags"),
             $e("input", {id: cid + "-tags", name: "tags", type: "text", size: 50, placeholder: "Comment tags"})));
-        btnbox.append($e("button", {type: "button", name: "showtags", class: "btn-licon need-tooltip", "aria-label": "Tags"}, svge_use_licon("tag")));
+        btnbox.append($e("button", {type: "button", name: "showtags", class: "btn-licon need-tooltip", "aria-label": "Tags"}, $svg_use_licon("tag")));
     }
 
     // visibility
@@ -7309,7 +7437,7 @@ function cmt_render_form_prop(cj, cid, btnbox) {
             $e("div", "entry",
                 $e("span", "select", etsel),
                 $e("p", "f-d text-break-line"))));
-        btnbox.append($e("button", {type: "button", name: "showthread", class: "btn-licon need-tooltip", "aria-label": "Thread", "data-editable-attachments": cid + "-attachments"}, svge_use_licon("thread")));
+        btnbox.append($e("button", {type: "button", name: "showthread", class: "btn-licon need-tooltip", "aria-label": "Thread", "data-editable-attachments": cid + "-attachments"}, $svg_use_licon("thread")));
     }
 
     // delete
@@ -7321,7 +7449,7 @@ function cmt_render_form_prop(cj, cid, btnbox) {
         } else {
             bnote = "Are you sure you want to override the deadline and delete this " + x + "?";
         }
-        btnbox.append($e("button", {type: "button", name: "delete", class: "btn-licon need-tooltip", "aria-label": "Delete " + x, "data-override-text": bnote}, svge_use_licon("trash")));
+        btnbox.append($e("button", {type: "button", name: "delete", class: "btn-licon need-tooltip", "aria-label": "Delete " + x, "data-override-text": bnote}, $svg_use_licon("trash")));
     }
 
     // response ready
@@ -8874,7 +9002,7 @@ function suggest() {
 
         hiding = false;
         if (!hintdiv) {
-            hintdiv = make_bubble({anchor: "nw", color: "suggest"});
+            hintdiv = make_bubble({anchor: "nw", class: "suggest"});
             hintdiv.self().on("mousedown", function (evt) { evt.preventDefault(); })
                 .on("click", ".suggestion", click)
                 .on("mousemove", ".suggestion", hover);
@@ -9888,17 +10016,15 @@ var paperlist_tag_ui = (function () {
 function tag_canonicalize(tag) {
     if (tag && tag.charCodeAt(0) === 126 && tag.charCodeAt(1) !== 126) {
         return siteinfo.user.uid + tag;
-    } else {
-        return tag;
     }
+    return tag;
 }
 
 function tag_simplify(tag) {
     if (tag && tag.startsWith(siteinfo.user.uid + "~")) {
         return tag.substring(("" + siteinfo.user.uid).length);
-    } else {
-        return tag;
     }
+    return tag;
 }
 
 function tagvalue_parse(s) {
@@ -10523,7 +10649,7 @@ handle_ui.on("js-annotate-order", function () {
                 type: "button",
                 class: "ml-2 need-tooltip js-delete-ta",
                 "aria-label": "Delete annotation"
-            }, svge_use_licon("trash")),
+            }, $svg_use_licon("trash")),
             fieldset = $e("fieldset", "mt-3 mb-2",
                 $e("legend", null,
                     "#" + dtag + "#",
@@ -10991,7 +11117,7 @@ Assign_DraggableTable.prototype.commit = function () {
 
         // create dragger
         if (!dragger) {
-            dragger = make_bubble({color: "prowdrag dark", anchor: "w!*"});
+            dragger = make_bubble({class: "prowdrag dark", anchor: "w!*"});
             window.disable_tooltip = true;
         }
 
@@ -11005,7 +11131,7 @@ Assign_DraggableTable.prototype.commit = function () {
             y = rowanal.rs[rowanal.rs.length - 1].bottom();
         dragger.html(rowanal.content())
             .at(rowanal.rs[rowanal.srcindex].left() + 36, y)
-            .color("prowdrag dark" + (rowanal.srcindex === rowanal.dragindex ? " unchanged" : ""));
+            .className("prowdrag dark" + (rowanal.srcindex === rowanal.dragindex ? " unchanged" : ""));
     }
 
     function prowdrag_mousedown(evt) {
@@ -12394,7 +12520,7 @@ handle_ui.on("js-check-format", function () {
     }, 1000);
     $.ajax(hoturl("=api/formatcheck", {p: siteinfo.paperid}), {
         timeout: 20000, data: {
-            dt: doce.getAttribute("data-dt") || doce.getAttribute("data-dtype") /* XXX */,
+            dt: doce.getAttribute("data-dt"),
             docid: doce.getAttribute("data-docid")
         },
         success: function (data) {
@@ -12451,7 +12577,7 @@ function background_format_check() {
         });
     } else if (hasClass(needed, "is-npages")
                && (pid = needed.closest("[data-pid]"))) {
-        const dt = needed.getAttribute("data-dt") || needed.getAttribute("data-dtype") /* XXX */ || "0";
+        const dt = needed.getAttribute("data-dt") || "0";
         $.ajax(hoturl("api/formatcheck", {p: pid.getAttribute("data-pid"), dt: dt, soft: 1}), {
             success: function (data) {
                 if (data && data.ok)
@@ -12461,7 +12587,7 @@ function background_format_check() {
         });
     } else if (hasClass(needed, "is-nwords")
                && (pid = needed.closest("[data-pid]"))) {
-        const dt = needed.getAttribute("data-dt") || needed.getAttribute("data-dtype") /* XXX */ || "0";
+        const dt = needed.getAttribute("data-dt") || "0";
         $.ajax(hoturl("api/formatcheck", {p: pid.getAttribute("data-pid"), dt: dt, soft: 1}), {
             success: function (data) {
                 if (data && data.ok)
@@ -12503,10 +12629,7 @@ handle_ui.on("js-add-attachment", function () {
     var max_size = attache.getAttribute("data-document-max-size"),
         doce = $e("div", "has-document document-new-instance hidden",
             $e("div", "document-upload", filee), actionse);
-    if (attache.hasAttribute("data-dt") /* XXX backward compat */)
-        doce.setAttribute("data-dt", attache.getAttribute("data-dt"));
-    else
-        doce.setAttribute("data-dt", attache.getAttribute("data-dtype"));
+    doce.setAttribute("data-dt", attache.getAttribute("data-dt"));
     doce.setAttribute("data-document-name", name);
     if (max_size != null)
         doce.setAttribute("data-document-max-size", max_size);
@@ -12528,7 +12651,7 @@ handle_ui.on("js-replace-document", function () {
         doce.querySelector(".document-replacer").before(actions);
     }
     if (!u) {
-        const dt = doce.getAttribute("data-dt") || doce.getAttribute("data-dtype");
+        const dt = doce.getAttribute("data-dt");
         var dname = doce.getAttribute("data-document-name") || ("opt" + dt);
         u = $e("input", "uich document-uploader");
         u.id = u.name = dname + ":file";
@@ -12660,10 +12783,10 @@ handle_ui.on("document-uploader", function (event) {
             progress();
         }
         var args = {p: siteinfo.paperid};
-        if (token)
+        if (token) {
             args.token = token;
-        else {
-            args.dt = doce.getAttribute("data-dt") || doce.getAttribute("data-dtype");
+        } else {
+            args.dt = doce.getAttribute("data-dt");
             args.start = 1;
         }
         if (cancelled) {
@@ -12672,10 +12795,10 @@ handle_ui.on("document-uploader", function (event) {
                 $.ajax(hoturl("=api/upload", args), {method: "POST"});
             }
         } else if (!r.hash) {
-            var fd = new FormData, myxhr;
+            let fd = new FormData, myxhr;
             fd.append("mimetype", file.type);
             fd.append("filename", file.name);
-            var endpos = Math.min(size, pos + blob_limit);
+            const endpos = Math.min(size, pos + blob_limit);
             uploading = endpos - pos;
             if (uploading !== 0) {
                 args.offset = pos;
@@ -12756,6 +12879,101 @@ handle_ui.on("js-remove-document", function () {
     }
 });
 
+(function () {
+let potconf_timeout, potconf_status = 0;
+function update_potential_conflicts() {
+    potconf_timeout = null;
+    if (potconf_status === 1) {
+        potconf_status = 2;
+        return;
+    }
+    potconf_status = 1;
+    const fd = new FormData,
+        f = document.getElementById("f-paper"),
+        aufs = f.querySelector("fieldset[name=\"authors\"]"),
+        auin = aufs ? aufs.querySelectorAll("input[name]") : [];
+    for (const e of auin) {
+        fd.set(e.name, e.value);
+    }
+    if (f.elements.collaborators) {
+        fd.set("collaborators", f.elements.collaborators.value);
+    }
+    $.ajax(hoturl("=api/potentialconflicts", {p: f.getAttribute("data-pid"), ":method:": "GET"}), {
+        method: "POST", data: fd, processData: false, contentType: false,
+        success: save_potential_conflicts
+    });
+}
+function save_potential_conflicts(d) {
+    const old_potconf_status = potconf_status;
+    potconf_status = 0;
+    if (old_potconf_status === 2) {
+        update_potential_conflicts();
+    }
+    if (!d.ok || !d.potential_conflicts) {
+        return;
+    }
+    const fs = document.getElementById("pc_conflicts").closest("fieldset"),
+        cul = fs.lastChild.firstChild,
+        nul = cul.nextSibling,
+        pc_order = fs.getAttribute("data-pc-order").split(/ /),
+        potconf_map = {};
+    for (const potconf of d.potential_conflicts) {
+        if (potconf.type !== "potentialconflict") {
+            continue;
+        }
+        potconf_map[potconf.uid] = potconf;
+        let tt = document.getElementById(`d-pcconf:${potconf.uid}`);
+        if (!tt) {
+            tt = hotcrp.make_bubble.skeleton();
+            tt.id = `d-pcconf:${potconf.uid}`;
+            fs.lastChild.appendChild(tt);
+        }
+        if (potconf.tooltip !== "<5>" + tt.firstChild.innerHTML) {
+            render_text.onto(tt.firstChild, "f", potconf.tooltip);
+        }
+    }
+    let cli = cul.firstChild, nli = nul.firstChild;
+    for (const uid of pc_order) {
+        const isc = cli && cli.getAttribute("data-uid") === uid,
+            isn = nli && nli.getAttribute("data-uid") === uid;
+        if (!isc && !isn) {
+            continue;
+        }
+        const li = isc ? cli : nli, elt = li.firstChild;
+        if (isc) {
+            cli = cli.nextSibling;
+        } else {
+            nli = nli.nextSibling;
+        }
+        const wantc = potconf_map[uid];
+        if (wantc) {
+            if (!isc) {
+                elt.appendChild($e("div", "pcconfmatch"));
+                cul.insertBefore(li, cli);
+            }
+            if (wantc.description !== "<0>" + elt.lastChild.textContent) {
+                render_text.onto(elt.lastChild, "f", wantc.description);
+            }
+            addClass(elt, "want-tooltip");
+            elt.setAttribute("aria-describedby", `d-pcconf:${uid}`);
+        } else if (isc) {
+            if (hasClass(elt.lastChild, "pcconfmatch")) {
+                elt.lastChild.remove();
+            }
+            if (!hasClass(elt, "pcconf-conflicted")) {
+                nul.insertBefore(li, nli);
+            }
+            removeClass(elt, "want-tooltip");
+            elt.removeAttribute("aria-describedby");
+        }
+    }
+}
+handle_ui.on("js-update-potential-conflicts", function () {
+    potconf_timeout && clearTimeout(potconf_timeout);
+    potconf_timeout = setTimeout(update_potential_conflicts, 1000);
+});
+})();
+
 handle_ui.on("js-withdraw", function () {
     const f = this.form, $pu = $popup({near: this, action: f});
     $pu.append($e("p", null, "Are you sure you want to withdraw this " + siteinfo.snouns[0] + " from consideration and/or publication?" + (this.hasAttribute("data-revivable") ? "" : " Only administrators can undo this step.")),
@@ -12791,7 +13009,7 @@ handle_ui.on("js-clickthrough", function () {
                 $container.find(".need-clickthrough-enable").prop("disabled", false).removeClass("need-clickthrough-enable");
                 $container.find(".js-clickthrough-terms").slideUp();
             } else {
-                make_bubble("You can’t continue to review until you accept these terms.", "errorbubble")
+                make_bubble({content: "You can’t continue to review until you accept these terms.", class: "errorbubble"})
                     .anchor("w").near(self);
             }
         });
@@ -13088,12 +13306,10 @@ edit_conditions.numeric = function (ec, form) {
     return v !== "" && !isNaN((n = parseFloat(v))) ? n : null;
 };
 edit_conditions.document_count = function (ec, form) {
+    const fs = fieldset(form, ec.fieldset || ec.formid);
     let n = 0;
-    $(form).find(".has-document").each(function () {
-        if ((this.getAttribute("data-dt") || this.getAttribute("data-dtype")) != ec.dt) {
-            return;
-        }
-        const name = this.getAttribute("data-document-name"),
+    for (const dn of fs.querySelectorAll(".has-document")) {
+        const name = dn.getAttribute("data-document-name"),
             removee = form.elements[name + ":delete"];
         if (removee && removee.value) {
             return;
@@ -13108,7 +13324,7 @@ edit_conditions.document_count = function (ec, form) {
         } else if (preve && preve.value) {
             n += 1;
         }
-    });
+    }
     return n;
 };
 edit_conditions.compar = function (ec, form) {
@@ -13711,7 +13927,7 @@ handle_ui.on("js-edit-formulas", function () {
         if (f.editable) {
             nei.className = "mb-1";
             nei.append($e("input", {type: "text", id: "k-formula/" + count + "/name", class: "editformulas-name need-autogrow", name: "formula/" + count + "/name", size: 30, value: f.name, placeholder: "Formula name"}),
-                $e("button", {type: "button", class: "ml-2 delete-link need-tooltip btn-licon-s", "aria-label": "Delete formula"}, svge_use_licon("trash")));
+                $e("button", {type: "button", class: "ml-2 delete-link need-tooltip btn-licon-s", "aria-label": "Delete formula"}, $svg_use_licon("trash")));
             xei.append($e("textarea", {class: "editformulas-expression need-autogrow w-99", id: "k-formula/" + count + "/expression", name: "formula/" + count + "/expression", rows: 1, cols: 64, placeholder: "Formula definition"}, f.expression));
         } else {
             nei.append(f.name);
@@ -15081,7 +15297,6 @@ Object.assign(window.hotcrp, {
     // set_scoresort
     // shortcut
     // suggest
-    svge: svge,
     // text
     // tooltip
     // tracker_show_elapsed

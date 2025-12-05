@@ -366,6 +366,15 @@ class PaperTable {
         return $this->can_view_reviews;
     }
 
+    /** @return bool */
+    function has_editable_pc_conflicts() {
+        $opt = $this->conf->option_by_id(PaperOption::PCCONFID);
+        '@phan-var-force PCConflicts_PaperOption $opt';
+        return $this->edit_mode === 2
+            && $opt->test_visible($this->prow)
+            && ($this->admin || $opt->test_editable($this->prow));
+    }
+
     /** @param string $abstract
      * @return bool */
     private function abstract_foldable($abstract) {
@@ -495,8 +504,12 @@ class PaperTable {
         } else {
             $for = $rest["for"] ?? false;
         }
-        echo $fieldset ? "<fieldset name=\"{$opt->formid}\"" : "<div",
-            " class=\"pf pfe";
+        if ($fieldset) {
+            $fsname = $fieldset === true ? $opt->formid : $fieldset;
+            echo "<fieldset name=\"{$fsname}\" class=\"pf pfe";
+        } else {
+            echo "<div class=\"pf pfe";
+        }
         if ((!$opt->test_exists($this->prow) && !$this->settings_mode)
             || ($rest["hidden"] ?? false)) {
             echo " hidden";
@@ -505,6 +518,10 @@ class PaperTable {
             && !$this->settings_mode
             && $input) {
             echo " has-edit-condition\" data-edit-condition=\"", htmlspecialchars(json_encode_browser($opt->exists_script_expression($this->prow)));
+        }
+        foreach ($rest as $key => $value) {
+            if (str_starts_with($key, "data-"))
+                echo "\" {$key}=\"", htmlspecialchars($value);
         }
         echo $fieldset ? "\"><legend>" : "\">",
             "<h3 class=\"", $this->control_class($opt->formid, "pfehead");
@@ -543,7 +560,7 @@ class PaperTable {
             echo "</legend>";
         }
         $this->print_field_description($opt);
-        if ((!$input && $this->edit_mode === 2)
+        if (($this->edit_mode === 2 && !$input)
             || ($this->admin && !$opt->test_editable($this->prow))) {
             if ($input) {
                 $ml = [MessageItem::marked_note("<0>Only administrators can edit this field.")];
@@ -2379,6 +2396,7 @@ class PaperTable {
         }
         $form_js = [
             "id" => "f-paper",
+            "data-pid" => $this->prow->paperId ? : "new",
             "name" => base64_encode(random_bytes(8)), // prevent FF from incorrectly autofilling on reload
             "class" => "need-unload-protection need-diff-check ui-submit js-submit-paper",
             "data-differs-toggle" => "paper-alert"
@@ -2414,6 +2432,7 @@ class PaperTable {
                 $fr->clear();
                 $o->render($fr, $ov);
                 if ($fr->is_empty()) {
+                    $o->print_web_edit_hidden($this, $ov);
                     continue;
                 }
                 if ($o->type === "checkbox") {
@@ -2423,6 +2442,7 @@ class PaperTable {
                     $heading = null;
                 }
                 $this->print_editable_option_papt($o, $heading, ["for" => false, "input" => false]);
+                $o->print_web_edit_hidden($this, $ov);
                 $klass = $fr->value_long ? "papev w-text" : "papev"; // XXX too one-weird-trick
                 echo $fr->value_html($klass), "</div>";
                 continue;

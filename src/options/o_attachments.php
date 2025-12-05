@@ -148,7 +148,7 @@ class Attachments_PaperOption extends PaperOption {
         $pt->print_editable_option_papt($this, $title, [
             "id" => $this->readable_formid(), "for" => false, "fieldset" => true
         ]);
-        echo '<div class="papev has-editable-attachments" data-document-prefix="', $this->formid, '" data-dt="', $this->id, '" data-dtype="', /* XXX backward compat */ $this->id, '" id="', $this->formid, ':attachments"';
+        echo '<div class="papev has-editable-attachments" data-document-prefix="', $this->formid, '" data-dt="', $this->id, '" id="', $this->formid, ':attachments"';
         if ($this->max_size > 0) {
             echo ' data-document-max-size="', (int) $this->max_size, '"';
         }
@@ -157,7 +157,6 @@ class Attachments_PaperOption extends PaperOption {
             $ctr = $i + 1;
             $oname = "{$this->formid}:{$ctr}";
             echo '<div class="has-document" data-dt="', $this->id,
-                '" data-dtype="', $this->id, /* XXX backward compat */
                 '" data-document-name="', $oname, '"><div class="document-file">',
                 Ht::hidden($oname, $doc->paperStorageId),
                 $doc->link_html(htmlspecialchars($doc->member_filename())),
@@ -170,6 +169,17 @@ class Attachments_PaperOption extends PaperOption {
         echo '</div><div class="mt-2">',
             Ht::button("Add attachment", ["class" => "ui js-add-attachment", "data-editable-attachments" => "{$this->formid}:attachments"]),
             "</div></fieldset>\n\n";
+    }
+    function print_web_edit_hidden(PaperTable $pt, $ov) {
+        echo '<fieldset name="', $this->formid, '" role="none" hidden>';
+        foreach ($ov->document_set() as $i => $doc) {
+            $ctr = $i + 1;
+            $oname = "{$this->formid}:{$ctr}";
+            echo '<div class="has-document" data-document-name="', $oname, '">',
+                Ht::hidden($oname, $doc->paperStorageId, ["disabled" => true]),
+                '</div>';
+        }
+        echo '</fieldset>';
     }
 
     function render(FieldRender $fr, PaperValue $ov) {
@@ -248,6 +258,6 @@ class Attachments_PaperOption extends PaperOption {
         return null;
     }
     function present_script_expression() {
-        return ["type" => "document_count", "formid" => $this->formid, "dt" => $this->id, "dtype" => $this->id /* XXX backward compat */];
+        return ["type" => "document_count", "fieldset" => $this->formid];
     }
 }

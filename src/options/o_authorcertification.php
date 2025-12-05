@@ -3,10 +3,10 @@
 // Copyright (c) 2006-2025 Eddie Kohler; see LICENSE.
 
 class AuthorCertification_Entry {
+    /** @var string */
+    public $email;
     /** @var int */
     public $uid;
-    /** @var ?string */
-    public $email;
     /** @var ?Contact */
     public $user;
     /** @var bool */
@@ -28,10 +28,14 @@ class AuthorCertification_Entry {
     const AUS_NOACCOUNT = 3;
     const AUS_DUPLICATE = 4;
 
+    /** @param string $email */
+    function __construct($email) {
+        $this->email = $email;
+    }
+
     /** @return AuthorCertification_Entry */
     static function make_email_by($email, $value, $admin, $viewer) {
-        $e = new AuthorCertification_Entry;
-        $e->email = $email;
+        $e = new AuthorCertification_Entry($email);
         $e->value = $value;
         $e->at = Conf::$now;
         $e->admin = $admin;
@@ -63,14 +67,13 @@ class AuthorCertification_Entry {
         $lemap = [];
         $entries = [];
         foreach ($authors as $auth) {
-            $entries[] = $e = new AuthorCertification_Entry;
+            $entries[] = $e = new AuthorCertification_Entry($auth->email);
             $e->value = false;
             $e->author = $auth;
             if ($auth->email === "") {
                 $e->austatus = $auth->is_empty() ? self::AUS_EMPTY : self::AUS_NOEMAIL;
                 continue;
             }
-            $e->email = $auth->email;
             $lemail = strtolower($e->email);
             if (isset($lemap[$lemail])) {
                 $e->austatus = self::AUS_DUPLICATE;
@@ -559,7 +562,52 @@ class AuthorCertification_PaperOption extends PaperOption {
         echo "</fieldset></div>\n\n";
     }
 
+    function print_web_edit_hidden(PaperTable $pt, $ov) {
+        echo '<fieldset name="', $this->formid, '" role="none" hidden>';
+        $entries = self::entries($ov);
+        $okey = $this->field_key();
+        $n = 0;
+        foreach ($pt->prow->author_list() as $auth) {
+            if ($auth->email) {
+                $oe = ACEntry::find_by_email($auth->email, $entries);
+                $oval = $oe && $oe->value;
+                echo Ht::checkbox("{$okey}:{$n}:value", 1, $oval, ["disabled" => true]);
+                ++$n;
+            }
+        }
+        if ($n === 0) {
+            echo Ht::checkbox("", 1, false, ["hidden" => true, "disabled" => true]);
+        }
+        echo '</fieldset>';
+    }
+
     function render(FieldRender $fr, PaperValue $ov) {
+        if (($fr->context & FieldRender::CFFORM) === 0) {
+            return;
+        }
+        $entries = self::entries($ov);
+        $ready = [[], []];
+        foreach ($ov->prow->author_list() as $auth) {
+            if (!$auth->email) {
+                continue;
+            }
+            $oe = ACEntry::find_by_email($auth->email, $entries);
+            $oval = $oe && $oe->value;
+            $ready[(int) $oval][] = '<li class="odname">' . $auth->name_h(NAME_E | NAME_A) . "</li>";
+        }
+        $t = "";
+        if (!empty($ready[1])) {
+            $mb = empty($ready[0]) ? " mb-0" : "";
+            $t .= '<h4 class="mb-0 font-italic">Complete</h4><ul class="x' . $mb . '">' . join("", $ready[1]) . '</ul>';
+        }
+        if (!empty($ready[0])) {
+            $t .= '<h4 class="mb-0 font-italic">Incomplete</h4><ul class="x mb-0">' . join("", $ready[0]) . '</ul>';
+        }
+        if ($t === "") {
+            $t .= '<h4 class="mb-0 font-italic">No authors yet</h4>';
+        }
+        $fr->value = $t;
+        $fr->value_format = 5;
     }
 
     function present_script_expression() {
