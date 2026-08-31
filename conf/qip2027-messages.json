@@ -1,0 +1,6 @@
+[
+  {
+    "in": "<0>Registered {submission} as #{}",
+    "out": "<0>{Submission} record created as #{}"
+  }
+]
