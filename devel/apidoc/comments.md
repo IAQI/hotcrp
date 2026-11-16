@@ -63,6 +63,7 @@ comment](#tag-comments)). The comment is returned in the `comment` response
 field as a [comment object](#tag-comments); if it does not exist or the caller
 may not see it, an error is returned.
 
+* scope comment:read
 * param c string: The comment to return (a numeric comment ID or a response
   selector).
 * param ?response string: Response-round name, when selecting a named response.
@@ -70,6 +71,13 @@ may not see it, an error is returned.
   from the response, returning only metadata. Defaults to `true`.
 
     * default true
+* param ?word_limit =soft|hard: Which word limit applies to responses with
+  word limits. `soft` (the default) returns the response cut at its word
+  limit; `hard` returns the response cut at the hard word limit (if any).
+  Fields over a limit are named in the response’s `overlong` and `truncated`
+  keys.
+
+    * default soft
 * response ?comment comment: The requested comment.
 * badge featured
 
@@ -102,7 +110,12 @@ Attachments are given as a `docs` array, each entry either retaining an existing
 attachment by `docid` or uploading a new one: inline via `content` (raw text) or
 `content_base64`, or by `content_file`, which names a file in the ZIP archive or
 an uploaded file field in a `json` form request. An omitted `docs` key keeps the
-comment’s current attachments.
+comment’s current attachments, and an omitted `text` key keeps its current text.
+
+Changing a comment’s attachments requires `document:write` scope as well as
+`comment:write`. This covers adding, replacing, or removing an attachment, and
+deleting a comment that has attachments. Edits that leave the attachments
+unchanged need only `comment:write`.
 
 The API also supports form upload using the parameter conventions of the HotCRP
 web application (such as a `text` parameter for the comment body). These
@@ -112,8 +125,16 @@ JSON.
 Saving with `text` empty and no attachments is refused for a new comment, but
 deletes an existing one (it is treated as `delete=1`).
 
+The [`GET /comment`](#get-comment) endpoint defaults to truncating comments
+at their soft word limits. A comment truncated this way (marked `soft`
+under the uploaded JSON‘s `truncated` key) is not saved, and is reported as an
+error. Provide `word_limit=hard` to `GET /comment` to avoid this error.
+
 To test a modification without saving, supply a `dry_run=1` parameter. This will
-test the uploaded JSON but make no changes to the database.
+test the uploaded JSON but make no visible changes to the database. Supply
+`dry_run=if_warning` to save only if the modification produces no warnings, or
+`dry_run=if_error` to save unless it produces an error; the response reports
+`dry_run` when a save was withheld.
 
 
 ## Concurrency
@@ -143,7 +164,10 @@ To upload a single new attachment:
 To upload multiple attachments, number them sequentially (`attachment:2`,
 `attachment:3`, and so forth). To delete an existing attachment, supply its
 `docid` as an `attachment:N` parameter, and set `attachment:N:delete` to 1.
+Changing attachments requires `document:write` scope (see
+[JSON upload](#tag-comments)).
 
+* scope comment:write
 * body application/json comment: A comment object supplied as a raw JSON body (see [JSON upload](#tag-comments)).
 
     * oneof body
@@ -161,10 +185,10 @@ To upload multiple attachments, number them sequentially (`attachment:2`,
     * default new
 * param ?=text string: The comment body. Required unless `delete=1`.
 * param ?delete boolean: Set to `1` to delete the selected comment.
-* param ?visibility comment_visibility: Who can see the comment: `admin`, `pc`, `rev` (default), or `au`.
+* param ?visibility comment_visibility: Who can see the comment: `admin`, `pc`, `rev`, or `au`.
 
     * default rev
-* param ?topic comment_topic: The comment thread: `rev` (default), `paper`, or `dec`.
+* param ?topic comment_topic: The comment thread: `rev`, `paper`, or `dec`.
 
     * default rev
 * param ?=tags string: Space-separated tags for the comment (ordinary comments only).
@@ -174,11 +198,15 @@ To upload multiple attachments, number them sequentially (`attachment:2`,
 * param ?=:attachment string: Structured attachment fields, `attachment:<n>` (see above).
 * param ?review_token string: Review token authorizing the edit, when acting through one.
 * param ?if_unmodified_since string: Reject the edit if the comment has been modified since this time (a Unix timestamp, matching the comment’s `modified_at`, or `0`). See [Concurrency](#tag-comments).
-* param ?dry_run boolean: True checks input for errors, but does not save changes.
+* param ?dry_run dry_run_mode: True checks input for errors, but does not save changes; `if_warning` saves only if there are no errors or warnings, `if_error` only if there are no errors.
 * param ?notify boolean: False disables all email notifications for the change (mention and follower notifications). Ignored unless the caller administers the submission.
 
     * default true
     * badge admin
+* param ?word_limit =soft|hard: Which word limit applies to returned comment
+  renderings.
+
+    * default hard
 * response ?dry_run boolean: True for `dry_run` requests.
 * response ?+valid boolean: True if and only if the modification was valid.
 
@@ -209,12 +237,13 @@ existing comment. This is equivalent to [`POST /{p}/comment`](#post-comment) wit
 `delete=1`, and is subject to the same permission and [concurrency](#tag-comments)
 rules.
 
+* scope comment:write
 * param c string: The comment to delete (a numeric comment ID or a response selector).
 * param ?response string: Response-round name, when selecting a named response.
 * param ?if_unmodified_since string: Reject the delete if the comment has been
   modified since this time (a Unix timestamp, matching the comment’s
   `modified_at`, or `0`).
-* param ?dry_run boolean: True checks the request but does not delete.
+* param ?dry_run dry_run_mode: True checks the request but does not delete; `if_warning` deletes only if there are no errors or warnings, `if_error` only if there are no errors.
 * param ?notify boolean: False disables email notifications. Ignored unless the caller administers the submission.
 
     * default true
@@ -223,7 +252,6 @@ rules.
 * response ?+valid boolean: True if the delete was valid; for a non-dry-run request, it was also committed.
 * response ?+change_list [string]: Always `["delete"]`.
 * response ?conflict boolean: True when the delete was rejected by a concurrency check (see [Concurrency](#tag-comments)).
-* badge featured
 * badge featured
 
 
@@ -242,6 +270,7 @@ As a shorthand for a single submission, supply its ID in `p` instead of `q`;
 this returns that submission’s visible comments. Supplying both `q` and `p` is
 an error.
 
+* scope comment:read
 * param ?q search_string: The search expression.
 * param ?p pid: A single submission, as an alternative to `q`.
 * param ?t
@@ -252,6 +281,10 @@ an error.
   from each returned comment, returning only metadata. Defaults to `true`.
 
     * default true
+* param ?word_limit =soft|hard: Which word limit applies to returned comment
+  renderings.
+
+    * default soft
 * response ?comments [comment]: The matching comment objects.
 * badge featured
 
@@ -288,6 +321,7 @@ reported without aborting the batch. The per-item results are returned in the
 and order as the input. Messages in `message_list` carry a `landmark` field set
 to the integer index of the item they concern.
 
+* scope comment:write
 * body application/json [comment]: An array of comment objects sent as a raw JSON body.
 
     * oneof body
@@ -300,14 +334,17 @@ to the integer index of the item they concern.
 * param ?upload upload_token: An [upload token](#post-upload) for a previously-uploaded JSON or ZIP file.
 
     * oneof body
-* param ?dry_run boolean: True checks input for errors, but does not save changes.
+* param ?dry_run dry_run_mode: True checks input for errors, but does not save changes; `if_warning` saves each item only if that item has no errors or warnings, `if_error` only if it has no errors.
 * param ?notify boolean: False disables notifications; honored per item only when the caller administers that submission.
 
     * default true
 * param ?if_unmodified_since string: A batch-wide default precondition, overridable by a comment object’s own `if_unmodified_since`.
-* response ?dry_run boolean: True for `dry_run` requests.
+* param ?word_limit =soft|hard: Which word limit applies to returned comment
+  renderings.
+
+    * default hard
 * response ?+status_list [comment_update_status]: Per-comment results, one entry per input object (same length and order as the input). Entry *i* reports `valid`, `change_list`, `pid`, and `cid`, plus `conflict` for an edit-conflict rejection.
-* response ?comments [comment]: The saved comments, one per input object (`null` for a failed item); omitted entirely for `dry_run`.
+* response ?comments [comment]: The saved comments, one per input object (`null` for an item that was not saved). Omitted entirely for `dry_run=1`; for `dry_run=if_warning` it is present, with `null` for each withheld item.
 * badge featured
 
 
@@ -330,6 +367,7 @@ present): `s` is offered immediately, while `sm1` is offered only once the user
 has typed at least one character. PC members use `sm1`, so the entire committee
 is not listed unprompted; authors and other direct participants use `s`.
 
+* scope other:read
 * param ?p pid: Submission whose participants may be mentioned.
 * response mentioncompletion [object]: Mention candidates, as autocompleter items.
 

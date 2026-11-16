@@ -13,8 +13,7 @@ function stoi($s) {
         return null;
     }
     $iv = intval($s);
-    $fv = floatval($s);
-    return $iv == $fv ? $iv : null;
+    return (string) $iv === $s ? $iv : null;
 }
 
 /** @param null|int|float|string $s
@@ -26,8 +25,10 @@ function stonum($s) {
         return null;
     }
     $iv = intval($s);
-    $fv = floatval($s);
-    return $iv == $fv ? $iv : $fv;
+    if ((string) $iv === $s) {
+        return $iv;
+    }
+    return floatval($s);
 }
 
 /** @param null|int|float|string $value
@@ -197,6 +198,16 @@ class JsonResult implements JsonSerializable, ArrayAccess {
         return new JsonResult(404, ["ok" => false, "message_list" => [$mi]]);
     }
 
+    /** @param Qrequest $qreq
+     * @param int $bits
+     * @param ?string $ftext
+     * @return JsonResult */
+    static function make_scope_error(Qrequest $qreq, $bits, $ftext = null) {
+        $mi = new MessageItem(2, null, $ftext ?? "<0>Method not permitted by scope");
+        return (new JsonResult(403, ["ok" => false, "message_list" => [$mi]]))
+            ->set_header($qreq->conf()->www_authenticate_header("insufficient_scope", $qreq, $bits));
+    }
+
 
     /** @param int $code
      * @return $this */
@@ -318,8 +329,22 @@ class JsonResult implements JsonSerializable, ArrayAccess {
     }
 
 
+    private function check_fmt() {
+        // warn if message_list contains items that require formatting
+        if (is_array($this->content["message_list"] ?? null)) {
+            foreach ($this->content["message_list"] as $mi) {
+                if ($mi instanceof MessageItem
+                    && $mi->need_fmt()) {
+                    error_log("message item needs fmt: {$mi->message} " . debug_string_backtrace());
+                    break;
+                }
+            }
+        }
+    }
+
     /** @param ?Qrequest $qreq */
     function emit($qreq = null) {
+        $this->check_fmt();
         if (!$this->minimal
             && $this->status
             && !isset($this->content["ok"])) {
@@ -344,12 +369,12 @@ class JsonResult implements JsonSerializable, ArrayAccess {
         foreach ($this->_headers ?? [] as $h) {
             Navigation::header($h);
         }
+        $pprint = $this->pretty_print ?? true;
         if ($qreq && isset($qreq->pretty)) {
-            $pprint = friendly_boolean($qreq->pretty);
-        } else {
-            $pprint = $this->pretty_print ?? true;
+            $pprint = friendly_boolean($qreq->pretty) ?? $pprint;
         }
-        echo json_encode_browser($this->content, ($pprint ? JSON_PRETTY_PRINT : 0) | JSON_UNESCAPED_SLASHES), "\n";
+        // don’t need JSON_HEX_TAG
+        echo json_encode_db($this->content, $pprint ? JSON_PRETTY_PRINT : 0), "\n";
     }
 
     /** @return never
@@ -360,6 +385,7 @@ class JsonResult implements JsonSerializable, ArrayAccess {
 
     #[\ReturnTypeWillChange]
     function jsonSerialize() {
+        $this->check_fmt();
         return $this->content;
     }
 }
@@ -539,9 +565,12 @@ function pluralize($s) {
             return "have";
         } else if ($s === "is") {
             return "are";
-        } else {
-            return "{$s}es";
+        } else if ($s === "does") {
+            return "do";
+        } else if ($s === "was") {
+            return "were";
         }
+        return "{$s}es";
     } else if ($last === "h"
                && $len > 1
                && ($s[$len - 2] === "s" || $s[$len - 2] === "c")) {
@@ -555,15 +584,17 @@ function pluralize($s) {
             return "those";
         } else if ($s === "it") {
             return "them";
-        } else {
-            return "{$s}s";
+        }
+        // fall through
+    } else if ($last === "o") {
+        if ($s === "do") {
+            return "does";
         }
     } else if ($last === ")"
                && preg_match('/\A(.*?)(\s*\([^)]*\))\z/', $s, $m)) {
         return pluralize($m[1]) . $m[2];
-    } else {
-        return "{$s}s";
     }
+    return "{$s}s";
 }
 
 /** @param int|float|array $n

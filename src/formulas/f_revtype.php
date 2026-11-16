@@ -18,11 +18,10 @@ class Revtype_Fexpr extends Fexpr {
     }
     function compile(FormulaCompiler $state) {
         if ($state->index_type === Fexpr::IDX_MY) {
-            return $state->define_gvar("myrevtype", $state->_prow() . "->review_type(\$user)");
+            return $state->define_gvar('$myrevtype', $state->_prow() . "->review_type(\$user)");
         }
-        $state->queryOptions["reviewSignatures"] = true;
-        $rrow = $state->_rrow();
-        $rmv = $state->_rrow_meta_viewable();
+        $rrow = $state->current_rrow();
+        $rmv = $state->current_rrow_meta_viewable();
         return "({$rmv} ? {$rrow}->reviewType : null)";
     }
 }

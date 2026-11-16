@@ -50,8 +50,8 @@ class CommentInfo {
     public $message_list;
     /** @var ?Contact */
     private $_commenter;
-    /** @var ?bool */
-    private $_recently_censored;
+    /** @var int */
+    private $_recently_censored = 0;
     /** @var ?bool */
     private $_recently_censorable;
     /** @var ?array<string,mixed> */
@@ -76,6 +76,9 @@ class CommentInfo {
     const CT_BYADMINISTRATOR = 0x100;
     const CT_TOPIC_DECISION = 0x200;
     const CT_BYMETAREVIEWER = 0x400;
+    const CT_BOT = 0x800;           // this version was written by a bot
+    const CT_BOT_PREVIOUS = 0x1000; // a previous version was written by a bot
+    const CTM_BOT = 0x1800;         // CT_BT | CT_BOT_PREVIOUS
     const CT_FROZEN = 0x4000;
     const CT_SUBMIT = 0x8000; // only used internally, not in database
     const CTVIS_ADMINONLY = 0x00000;
@@ -102,19 +105,26 @@ class CommentInfo {
      * @readonly */
     static private $visibility_revmap = [
         "admin" => 0x00000 /* CTVIS_ADMINONLY */,
-        "pc" => 0x10000 /* CTVIS_PCONLY */,
-        "p" => 0x10000 /* CTVIS_PCONLY */,
-        "rev" => 0x20000 /* CTVIS_REVIEWER */,
-        "r" => 0x20000 /* CTVIS_REVIEWER */,
+        "admin_only" => 0x00000 /* CTVIS_ADMINONLY */,
+        "a" => 0x30000 /* CTVIS_AUTHOR */,
         "au" => 0x30000 /* CTVIS_AUTHOR */,
-        "a" => 0x30000 /* CTVIS_AUTHOR */
+        "authors" => 0x30000 /* CTVIS_AUTHOR */,
+        "p" => 0x10000 /* CTVIS_PCONLY */,
+        "pc" => 0x10000 /* CTVIS_PCONLY */,
+        "pc_only" => 0x10000 /* CTVIS_PCONLY */,
+        "r" => 0x20000 /* CTVIS_REVIEWER */,
+        "rev" => 0x20000 /* CTVIS_REVIEWER */,
+        "reviewers" => 0x20000 /* CTVIS_REVIEWER */
     ];
     /** @var array<string,int>
      * @readonly */
     static private $topic_revmap = [
+        "dec" => 0x200 /* CT_TOPIC_DECISION */,
+        "decision" => 0x200 /* CT_TOPIC_DECISION */,
         "paper" => 0x40 /* CT_TOPIC_PAPER */,
         "rev" => 0,
-        "dec" => 0x200 /* CT_TOPIC_DECISION */
+        "reviews" => 0,
+        "submission" => 0x40 /* CT_TOPIC_PAPER */
     ];
 
 
@@ -200,11 +210,15 @@ class CommentInfo {
             return self::CT_RESPONSE
                 | self::CTVIS_AUTHOR
                 | ($this->prow->blind ? self::CT_BLIND : 0)
-                | ($ctype & (self::CT_DRAFT | self::CT_SUBMIT));
+                | ($ctype & (self::CT_DRAFT | self::CT_SUBMIT | self::CTM_BOT));
         } else if (($ctype & self::CTM_BYAUTHOR) !== 0) {
+            if (($ctype & self::CTM_VIS) !== self::CTVIS_ADMINONLY
+                && ($ctype & self::CTM_VIS) !== self::CTVIS_AUTHOR) {
+                $ctype = ($ctype & ~self::CTM_VIS) | self::CTVIS_AUTHOR;
+            }
             return self::CT_BYAUTHOR
                 | ($this->prow->blind ? self::CT_BLIND : 0)
-                | ($ctype & (self::CTM_TOPIC | self::CTM_VIS | self::CT_SUBMIT));
+                | ($ctype & (self::CTM_TOPIC | self::CTM_VIS | self::CT_SUBMIT | self::CTM_BOT));
         }
         $rb = $this->conf->review_blindness();
         if ($rb === Conf::BLIND_NEVER) {
@@ -229,8 +243,9 @@ class CommentInfo {
 
 
     /** @param PaperInfo $prow
+     * @param Contact $user
      * @return string */
-    static function script($prow) {
+    static function script($prow, $user) {
         if (!Ht::mark_stash("papercomment")) {
             return "";
         }
@@ -243,7 +258,7 @@ class CommentInfo {
                 $j["hwl"] = $rrd->hard_wordlimit;
             }
             $crow->commentRound = $rrd->id;
-            if (Contact::$main_user->can_edit_response($prow, $crow)) {
+            if ($user->can_edit_response($prow, $crow)) {
                 if (($m = $rrd->instructions($prow->conf)) !== false) {
                     $j["instrux"] = $m;
                 }
@@ -253,13 +268,13 @@ class CommentInfo {
             }
             $t[] = "hotcrp.set_response_round(" . json_encode_browser($rrd->name) . "," . json_encode_browser($j) . ")";
         }
-        Icons::stash_defs("tag", "attachment", "trash", "thread");
         return Ht::unstash_script(join(";", $t));
     }
 
-    /** @param PaperInfo $prow */
-    static function print_script($prow) {
-        echo self::script($prow);
+    /** @param PaperInfo $prow
+     * @param Contact $user */
+    static function print_script($prow, $user) {
+        echo self::script($prow, $user);
     }
 
 
@@ -313,7 +328,7 @@ class CommentInfo {
         if (($o = $this->unparse_ordinal()) !== null) {
             return "c{$o}";
         } else if (($rrd = $this->response_round()) !== null) {
-            return $rrd->unnamed ? "response" : "{$rrd->name}response";
+            return $rrd->id_name();
         }
         return "cx{$this->commentId}";
     }
@@ -340,33 +355,38 @@ class CommentInfo {
     }
 
     /** @param ContactPermissions $viewer
-     * @param array{int,int,int,?bool} $mn
+     * @param array{int,int,int,int|bool} $mn
      * @param int $censor_until
      * @return bool */
     private function _mention_censor($viewer, $mn, $censor_until) {
         // skip bogus, already-pseudonymous, and self mentions
         if (!is_array($mn)
             || count($mn) < 4
-            || !$mn[3]
+            || ((int) $mn[3] & MentionPhrase::TF_NAMED) === 0
             || $mn[0] === $viewer->contactId
             || !($this->_recently_censorable ?? $this->_mention_censorable($viewer))) {
             return false;
         }
         // skip mentions beyond boundary
         if ($mn[1] >= $censor_until) {
+            $this->_recently_censored |= 1;
             return false;
         }
         // do not censor visible shepherd
-        if ($mn[0] === $this->prow->shepherdContactId
+        $mt = is_int($mn[3]) ? $mn[3] : MentionPhrase::TFM_ALL;
+        if (($mt & MentionPhrase::TF_SHEPHERD) !== 0
+            && $mn[0] === $this->prow->shepherdContactId
             && $viewer->can_view_shepherd($this->prow)) {
             return false;
         }
         // do not censor visible reviewer identity
-        if ($this->prow->can_view_review_identity_of($mn[0], $viewer)) {
+        if (($mt & MentionPhrase::TF_REVIEWER) !== 0
+            && $this->prow->can_view_review_identity_of($mn[0], $viewer)) {
             return false;
         }
         // do not censor fellow author
-        if ($this->prow->has_author($viewer)
+        if (($mt & MentionPhrase::TF_AUTHOR) !== 0
+            && $this->prow->has_author($viewer)
             && $this->prow->has_author($mn[0])) {
             return false;
         }
@@ -386,10 +406,33 @@ class CommentInfo {
 
     /** @param ContactPermissions $viewer
      * @param int $uid
+     * @param null|int|bool $mt
      * @return string */
-    private function _mention_pseudonym($viewer, $uid) {
-        $s = $this->prow->unparse_pseudonym($viewer, $uid) ?? "Anonymous";
+    private function _mention_pseudonym($viewer, $uid, $mt) {
+        $mt = is_int($mt) ? $mt : null;
+        $s = $this->prow->unparse_pseudonym($viewer, $uid, $mt) ?? "Anonymous";
         return "@{$s}";
+    }
+
+    /** @param ?ContactPermissions $viewer
+     * @return bool */
+    function content_censored($viewer) {
+        if (!$viewer
+            || !($mns = $this->data("mentions"))
+            || !is_array($mns)) {
+            return false;
+        }
+        $ret = false;
+        if ($this->_mention_censorable($viewer)) {
+            foreach ($mns as $mn) {
+                if ($this->_mention_censor($viewer, $mn, PHP_INT_MAX)) {
+                    $ret = true;
+                    break;
+                }
+            }
+        }
+        $this->_recently_censorable = null;
+        return $ret;
     }
 
     /** @param ?ContactPermissions $viewer
@@ -400,26 +443,31 @@ class CommentInfo {
         if ($t === ""
             || !$viewer
             || !($mns = $this->data("mentions"))
-            || !is_array($mns)
-            || !$this->_mention_censorable($viewer)) {
+            || !is_array($mns)) {
             return $t;
         }
-        $delta = 0;
-        $censor_until = $censor_until ?? PHP_INT_MAX;
-        foreach ($mns as $mn) {
-            if ($this->_mention_censor($viewer, $mn, $censor_until - $delta)) {
-                $r = $this->_mention_pseudonym($viewer, $mn[0]);
-                $t = substr_replace($t, $r, $mn[1] + $delta, $mn[2] - $mn[1]);
-                $delta += strlen($r) - ($mn[2] - $mn[1]);
-                $this->_recently_censored = true;
+        if ($this->_mention_censorable($viewer)) {
+            $delta = 0;
+            $censor_until = $censor_until ?? PHP_INT_MAX;
+            foreach ($mns as $mn) {
+                if ($this->_mention_censor($viewer, $mn, $censor_until - $delta)) {
+                    $r = $this->_mention_pseudonym($viewer, $mn[0], $mn[3]);
+                    $t = substr_replace($t, $r, $mn[1] + $delta, $mn[2] - $mn[1]);
+                    $delta += strlen($r) - ($mn[2] - $mn[1]);
+                    $this->_recently_censored |= 2;
+                }
+            }
+            if (($this->_recently_censored & 1) !== 0) {
+                // truncate where we stopped censoring
+                $t = UnicodeHelper::utf8_truncate($t, $censor_until);
             }
         }
         $this->_recently_censorable = null;
         return $t;
     }
 
-    /** @param list<array{int,int,int,bool}> $mns
-     * @return list<array{int,int,int,bool}> */
+    /** @param list<array{int,int,int,int|bool}> $mns
+     * @return list<array{int,int,int,int|bool}> */
     private function make_my_mentions(Contact $viewer, $mns) {
         $delta = 0;
         $result = [];
@@ -427,7 +475,7 @@ class CommentInfo {
             if ($mn[0] === $viewer->contactId) {
                 $result[] = [$mn[0], $mn[1] + $delta, $mn[2] + $delta, $mn[3]];
             } else if ($this->_mention_censor($viewer, $mn, PHP_INT_MAX)) {
-                $r = $this->_mention_pseudonym($viewer, $mn[0]);
+                $r = $this->_mention_pseudonym($viewer, $mn[0], $mn[3]);
                 $delta += strlen($r) - ($mn[2] - $mn[1]);
             }
         }
@@ -480,15 +528,17 @@ class CommentInfo {
      * @param bool $separateColors
      * @return list<array{CommentInfo,int,string}> */
     static function group_by_identity($crows, Contact $viewer, $separateColors) {
-        $known_cids = [];
+        $known_cids = $pseudonyms = [];
         '@phan-var array<int,int> $known_cids';
         $result = [];
         '@phan-var list<array{CommentInfo,int,string}> $result';
         foreach ($crows as $cr) {
             $cid = 0;
-            if ($viewer->can_view_comment_identity($cr->prow, $cr)
-                || $cr->unparse_commenter_pseudonym($viewer)) {
+            if ($viewer->can_view_comment_identity($cr->prow, $cr)) {
                 $cid = $cr->contactId;
+            } else if (($p = $cr->unparse_commenter_pseudonym($viewer, false))) {
+                $pdn = &$pseudonyms[$p];
+                $cid = $pdn = $pdn ?? -count($pseudonyms);
             }
             if ($cr->commentType & self::CT_RESPONSE) {
                 if (!empty($result)) {
@@ -524,15 +574,26 @@ class CommentInfo {
         return $result;
     }
 
-    /** @return ?string */
-    private function unparse_commenter_pseudonym(ContactPermissions $viewer) {
-        if (($this->commentType & self::CTM_BYAUTHOR) !== 0) {
+    /** @param bool $idable
+     * @return ?string */
+    function unparse_commenter_pseudonym(ContactPermissions $viewer, $idable) {
+        if (($this->commentType & self::CTM_BYAUTHOR) !== 0
+            && (!$idable || $viewer->can_view_authors($this->prow))) {
             return "Author";
-        } else if (($this->commentType & (self::CTM_VIS | self::CT_BYSHEPHERD)) === (self::CTVIS_AUTHOR | self::CT_BYSHEPHERD)
-                   && $this->contactId === $this->prow->shepherdContactId) {
+        }
+        $shepherd = ($this->commentType & self::CT_BYSHEPHERD) !== 0
+            && $this->contactId === $this->prow->shepherdContactId
+            && (!$idable || $viewer->can_view_shepherd($this->prow));
+        if ($shepherd
+            && ($this->commentType & self::CTM_VIS) === self::CTVIS_AUTHOR) {
             return "Shepherd";
         }
-        if (($rrow = $this->prow->review_by_user($this->contactId))) {
+        // A review pseudonym ("Reviewer A") shown next to a revealed author
+        // name would deanonymize a blind review, so offer it only when the
+        // identity is not already being shown ($idable false) or the viewer
+        // may view that review's identity anyway.
+        if (($rrow = $this->prow->review_by_user($this->contactId))
+            && (!$idable || $viewer->can_view_review_identity($this->prow, $rrow))) {
             if ($rrow->reviewOrdinal
                 && $viewer->can_view_review_assignment($this->prow, $rrow)) {
                 return "Reviewer " . unparse_latin_ordinal($rrow->reviewOrdinal);
@@ -540,10 +601,10 @@ class CommentInfo {
                 return "Metareviewer";
             }
         }
-        if (($this->commentType & self::CT_BYSHEPHERD) !== 0
-            && $this->contactId === $this->prow->shepherdContactId) {
+        if ($shepherd) {
             return "Shepherd";
-        } else if (($this->commentType & self::CT_BYADMINISTRATOR) !== 0) {
+        }
+        if (($this->commentType & self::CT_BYADMINISTRATOR) !== 0) {
             return "Administrator";
         }
         return null;
@@ -566,7 +627,7 @@ class CommentInfo {
         if ($viewer->can_view_comment_identity($this->prow, $this)) {
             $n = Text::nameo_h($this->commenter(), NAME_P|NAME_I);
         } else {
-            $n = $this->unparse_commenter_pseudonym($viewer) ?? "anonymous";
+            $n = $this->unparse_commenter_pseudonym($viewer, false) ?? "anonymous";
         }
         if (($this->commentType & self::CT_RESPONSE) !== 0) {
             $n = "<i>" . $this->unparse_response_text() . "</i>"
@@ -582,7 +643,7 @@ class CommentInfo {
         if ($viewer->can_view_comment_identity($this->prow, $this)) {
             $n = Text::nameo($this->commenter(), NAME_P|NAME_I);
         } else {
-            $n = $this->unparse_commenter_pseudonym($viewer) ?? "anonymous";
+            $n = $this->unparse_commenter_pseudonym($viewer, false) ?? "anonymous";
         }
         if (($this->commentType & self::CT_RESPONSE) !== 0) {
             $n = $this->unparse_response_text()
@@ -645,6 +706,15 @@ class CommentInfo {
             return !$this->attachments()->is_empty();
         }
         return ($this->commentType & self::CT_HASDOC) !== 0;
+    }
+
+    /** @return bool */
+    function has_viewable_attachments(Contact $viewer) {
+        // Assumes $viewer->can_view_comment($this).
+        return $this->has_attachments()
+            && $viewer->scope_allows(TokenScope::S_DOC_READ, $this->prow)
+            && (($this->commentType & self::CTM_BYAUTHOR) === 0
+                || $viewer->can_view_pdf($this->prow));
     }
 
     /** @return DocumentInfoSet */
@@ -714,9 +784,11 @@ class CommentInfo {
         return $docs;
     }
 
-    /** @param bool $no_content
+    const UNPARSE_NO_CONTENT = 1;
+    const UNPARSE_HARD_LIMIT = 2;
+    /** @param int $flags
      * @return ?object */
-    function unparse_json(Contact $viewer, $no_content = false) {
+    function unparse_json(Contact $viewer, $flags = 0) {
         if ($this->commentId !== 0
             && !$viewer->can_view_comment($this->prow, $this, true)) {
             return null;
@@ -824,7 +896,7 @@ class CommentInfo {
                 $cj["author_hidden"] = true;
             }
         }
-        if (($p = $this->unparse_commenter_pseudonym($viewer))) {
+        if (($p = $this->unparse_commenter_pseudonym($viewer, $idable))) {
             $cj["author_pseudonym"] = $p;
         }
         if ($idable && $this->commenter_may_be_pseudonymous()) {
@@ -841,18 +913,32 @@ class CommentInfo {
         }
 
         // content
-        if ($no_content) {
+        if (($flags & self::UNPARSE_NO_CONTENT) !== 0) {
             // do not include content
         } else if ($viewer->can_view_comment_content($this->prow, $this)) {
-            $cj["text"] = $this->content($viewer);
-            if ($this->has_attachments()) {
+            $ctext = $this->content($viewer);
+            if (($rrd = $this->response_round())
+                && $rrd->wordlimit > 0) {
+                $truncation = Text::apply_wordlimit($ctext, $rrd->wordlimit, $rrd->hard_wordlimit, ($flags & self::UNPARSE_HARD_LIMIT) !== 0);
+                $cj["text"] = $truncation->truncation ?? $ctext;
+                $cj["word_count"] = $truncation->word_count;
+                if ($truncation->overlong) {
+                    $cj["overlong"] = ["text" => true];
+                }
+                if ($truncation->truncation !== null) {
+                    $cj["truncated"] = ["text" => $truncation->truncation_band];
+                }
+            } else {
+                $cj["text"] = $ctext;
+            }
+            if ($this->has_viewable_attachments($viewer)) {
                 $cj["docs"] = $this->attachments_json($cj["editable"] ?? false);
             }
             if (($mentions = $this->data("mentions"))
                 && ($my_mentions = $this->make_my_mentions($viewer, $mentions))) {
                 $cj["my_mentions"] = $my_mentions;
             }
-        } else {
+        } else if ($this->is_response() && $viewer->is_admin($this->prow)) {
             $cj["word_count"] = count_words($this->raw_content());
         }
 
@@ -868,8 +954,8 @@ class CommentInfo {
             $ordinal = $this->unparse_ordinal();
             $x = "Comment" . ($ordinal ? " @{$ordinal}" : "");
         }
-        $p = $this->unparse_commenter_pseudonym($viewer);
         $idable = $viewer->can_view_comment_identity($this->prow, $this);
+        $p = $this->unparse_commenter_pseudonym($viewer, $idable);
         if ($idable) {
             $n = Text::nameo($this->commenter(), NAME_EB);
             $np = $this->commenter_may_be_pseudonymous();
@@ -887,15 +973,13 @@ class CommentInfo {
         }
         $ctext = $this->content($viewer);
         if ($rrd && $rrd->wordlimit > 0) {
-            $nwords = count_words($ctext);
-            $x .= " (" . plural($nwords, "word") . ")";
-            if ($nwords > $rrd->wordlimit
-                && ($flags & ReviewForm::UNPARSE_TRUNCATE) !== 0) {
-                list($ctext, $overflow) = count_words_split($ctext, $rrd->wordlimit);
-                if ($rrd->wordlimit === $rrd->hard_wordlimit) {
-                    $ctext = rtrim($ctext) . "…\n- - - - - - - - - - - - - - Truncated for length - - - - - - - - - - - - - -\n";
+            $truncation = Text::apply_wordlimit($ctext, $rrd->wordlimit, $rrd->hard_wordlimit, ($flags & ReviewForm::UNPARSE_TRUNCATE) === 0);
+            $x .= " (" . plural($truncation->word_count, "word") . ")";
+            if ($truncation->truncation !== null) {
+                if ($truncation->truncation_band === "hard") {
+                    $ctext = rtrim($truncation->truncation) . "…\n- - - - - - - - - - - - - - Truncated for length - - - - - - - - - - - - - -\n";
                 } else {
-                    $ctext = rtrim($ctext) . "…\n- - - - - - - Truncated for length, more available on website - - - - - - -\n";
+                    $ctext = rtrim($truncation->truncation) . "…\n- - - - - - - Truncated for length, more available on website - - - - - - -\n";
                 }
             }
         }
@@ -921,7 +1005,7 @@ class CommentInfo {
         $url = $this->conf->hoturl("paper", ["p" => $this->paperId, "#" => $this->unparse_html_id()]);
         $a = '<a href="' . Ht::escape_attr($url) . '"';
         $t = "<tr class=\"pl\"><td class=\"pl_eventicon\">{$a}>"
-            . Ht::img("comment48.png", "[Comment]", ["class" => "dlimg", "width" => 24, "height" => 24])
+            . Ht::img("comment48.svg", "[Comment]", ["class" => "dlimg", "width" => 24, "height" => 24])
             . "</a></td><td class=\"pl_eventid pl_rowclick\">{$a} class=\"pnum\">#{$this->paperId}</a></td><td class=\"pl_eventdesc pl_rowclick\"><small>{$a} class=\"ptitle\">"
             . htmlspecialchars(UnicodeHelper::utf8_word_abbreviate($this->prow->title, 80))
             . "</a>";
@@ -936,7 +1020,7 @@ class CommentInfo {
             $t .= ' <span class="barsep">·</span> <span class="hint">comment by</span> ' . $viewer->reviewer_html_for($this->contactId);
         }
         return $t . "</small><br>"
-            . htmlspecialchars(UnicodeHelper::utf8_word_abbreviate($this->content($viewer, 300), 300))
+            . htmlspecialchars(UnicodeHelper::utf8_word_abbreviate($this->content($viewer, 600), 300))
             . "</td></tr>";
     }
 
@@ -1099,9 +1183,10 @@ set {$okey}=(t.maxOrdinal+1) where paperId={$this->paperId} and commentId={$this
         $result = $this->conf->qe_apply($q, $qv);
         if (Dbl::is_error($result)) {
             return false;
-        }
-
-        if ($inserting) {
+        } else if ($inserting) {
+            if ($result->affected_rows === 0) { // concurrent response insertion
+                return false;
+            }
             $this->commentId = (int) $result->insert_id;
         }
 
@@ -1145,6 +1230,7 @@ set {$okey}=(t.maxOrdinal+1) where paperId={$this->paperId} and commentId={$this
 
     /** Delete this comment from the database and write the activity log. Does
      * not check permissions, recompute automatic tags, or send notifications.
+     * The comment may have staged changes.
      * @return bool */
     function delete(Contact $acting_user) {
         if (!$this->commentId) {
@@ -1161,7 +1247,7 @@ set {$okey}=(t.maxOrdinal+1) where paperId={$this->paperId} and commentId={$this
             $this->paperId);
 
         // document links
-        if ($this->has_attachments()) {
+        if ($this->has_attachments() || $this->_old_docs !== null) {
             $this->conf->qe("delete from DocumentLink where paperId=? and linkId=? and linkType=?", $this->paperId, $this->commentId, DTYPE_COMMENT);
             $this->prow->mark_inactive_linked_documents();
             $this->prow->invalidate_linked_documents();
@@ -1176,7 +1262,7 @@ set {$okey}=(t.maxOrdinal+1) where paperId={$this->paperId} and commentId={$this
     function mark_deleted() {
         $this->commentId = 0;
         $this->comment = "";
-        $this->commentTags = $this->commentData = $this->_jdata = null;
+        $this->commentTags = $this->commentData = $this->commentOverflow = $this->_jdata = null;
         $this->_old_docs = $this->_docs = null;
     }
 
@@ -1220,23 +1306,31 @@ set {$okey}=(t.maxOrdinal+1) where paperId={$this->paperId} and commentId={$this
                 continue;
             }
             $notification = $this->notification($mentionee, NotificationInfo::MENTION);
-            if ($notification->sent()
-                || $mentionee->is_dormant()
-                || !$mentionee->can_view_comment($this->prow, $this)) {
+            if ($notification->is(NotificationInfo::ATTEMPTED)
+                || $mentionee->is_dormant()) {
                 continue;
             }
-            $this->_recently_censored = false;
+            $notification->flags |= NotificationInfo::ATTEMPTED;
+            if (!$mxm->named()) {
+                $n = substr($this->raw_content(), $mxm->pos1 + 1, $mxm->pos2 - $mxm->pos1 - 1);
+                $notification->text = $n;
+            }
+            if (!$mentionee->can_view_comment($this->prow, $this)) {
+                if (!$mxm->is_notification_viewable($user, $this)) {
+                    $notification->flags |= NotificationInfo::PRETEND_SENT;
+                    if ($this->content_censored($mentionee)) {
+                        $notification->flags |= NotificationInfo::CENSORED;
+                    }
+                }
+                continue;
+            }
+            $this->_recently_censored = 0;
             HotCRPMailer::send_to($mentionee, "@mentionnotify", [
                 "prow" => $this->prow,
                 "comment_row" => $this
             ]);
-            if (!$mxm->named()
-                && !$this->prow->can_view_review_identity_of($mxm->user->contactId, $user)) {
-                $n = substr($this->raw_content(), $mxm->pos1 + 1, $mxm->pos2 - $mxm->pos1 - 1);
-                $notification->user_html = htmlspecialchars($n);
-            }
             $notification->flags |= NotificationInfo::SENT;
-            if ($this->_recently_censored) {
+            if ($this->_recently_censored !== 0) {
                 $notification->flags |= NotificationInfo::CENSORED;
             }
         }
@@ -1289,7 +1383,7 @@ set {$okey}=(t.maxOrdinal+1) where paperId={$this->paperId} and commentId={$this
         $info = [
             "prow" => $this->prow,
             "comment_row" => $this,
-            "combination_type" => 1
+            "combination_type" => HotCRPMailer::COMBINE_PAPER
         ];
         $preps = [];
         foreach ($this->followers() as $minic) {
@@ -1298,26 +1392,18 @@ set {$okey}=(t.maxOrdinal+1) where paperId={$this->paperId} and commentId={$this
             }
             $is_author = $this->prow->has_author($minic);
             $notification = $this->notification($minic, $is_author ? NotificationInfo::CONTACT : NotificationInfo::FOLLOW);
-            if ($notification->sent()) {
+            if ($notification->is(NotificationInfo::ATTEMPTED)) {
                 continue;
             }
+            $notification->flags |= NotificationInfo::ATTEMPTED;
             // prepare mail
-            $this->_recently_censored = false;
-            $p = HotCRPMailer::prepare_to($minic, $tmpl, $info);
-            if (!$p) {
-                continue;
-            }
-            // Don't combine preparations unless you can see all submitted
-            // reviewer identities
-            // XXX maybe should not combine preparations at all?
-            if (!$this->prow->has_author($minic)
-                && !$minic->can_view_review_identity($this->prow, null)) {
-                $p->unique_preparation = true;
-            }
-            $preps[] = $p;
-            $notification->flags |= NotificationInfo::SENT;
-            if ($this->_recently_censored) {
-                $notification->flags |= NotificationInfo::CENSORED;
+            $this->_recently_censored = 0;
+            if (($p = HotCRPMailer::prepare_to($minic, $tmpl, $info))) {
+                $preps[] = $p;
+                $notification->flags |= NotificationInfo::SENT;
+                if ($this->_recently_censored !== 0) {
+                    $notification->flags |= NotificationInfo::CENSORED;
+                }
             }
         }
         HotCRPMailer::send_combined_preparations($preps);

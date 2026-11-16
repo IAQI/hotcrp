@@ -300,9 +300,14 @@ class ManageEmail_Page {
         return $u;
     }
 
+    /** @return AuthenticationChecker */
+    private function make_authentication_checker(Contact $user) {
+        return ManageEmail_API::make_authentication_checker($user, $this->qreq);
+    }
+
     /** @return ?AuthenticationChecker */
     private function find_failed_authchecker() {
-        $acv = $this->viewer->authentication_checker($this->qreq, "manageemail");
+        $acv = $this->make_authentication_checker($this->viewer);
         if (!$acv->test()) {
             return $acv;
         }
@@ -310,13 +315,13 @@ class ManageEmail_Page {
             return null;
         }
         if ($this->user !== $this->viewer) {
-            $ac = $this->user->authentication_checker($this->qreq, "manageemail");
+            $ac = $this->make_authentication_checker($this->user);
             if (!$ac->test()) {
                 return $ac;
             }
         }
         if ($this->dstuser && $this->dstuser !== $this->viewer) {
-            $ac = $this->dstuser->authentication_checker($this->qreq, "manageemail");
+            $ac = $this->make_authentication_checker($this->dstuser);
             if (!$ac->test()) {
                 return $ac;
             }
@@ -385,7 +390,7 @@ class ManageEmail_Page {
         if ($what === "fail") {
             echo '<div class="aabut">', Ht::submit("Restart", ["name" => "back", "value" => "restart"]), '</div>';
         } else {
-            echo '<div class="aabut">', Ht::submit($this->curstep->next_label ?? "Next →", ["class" => $this->curstep->next_class ?? "btn-primary", "name" => "next", "value" => 1]), '</div>';
+            echo '<div class="aabut">', Ht::submit($this->curstep->next_label ?? "Next <span class=\"arrow\">→</span>", ["class" => $this->curstep->next_class ?? "btn-primary", "name" => "next", "value" => 1]), '</div>';
             if ($this->curstep->index > 0) {
                 echo '<div class="aabut">', Ht::submit("Back", ["name" => "back", "value" => 1]), '</div>';
             }
@@ -1146,6 +1151,7 @@ class ManageEmail_Page {
     }
 
     static function go(Contact $user, Qrequest $qreq) {
+        $user->conf->emit_credential_page_headers();
         $pg = new ManageEmail_Page($user, $qreq);
         $pg->run();
     }

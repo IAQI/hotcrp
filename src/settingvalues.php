@@ -20,6 +20,8 @@ class SettingValues extends MessageSet {
     public $link_json = false;
     /** @var bool */
     private $allowed;
+    /** @var bool */
+    private $edit_allowed;
 
     /** @var array<string,?string> */
     public $req = [];
@@ -94,8 +96,12 @@ class SettingValues extends MessageSet {
 
     function __construct(Contact $user) {
         $this->conf = $user->conf;
+        $this->set_message_formatter($this->conf);
         $this->user = $user;
-        $this->allowed = $user->privChair || $user->check_xtrack("settings!");
+        $this->allowed = ($user->privChair || $user->check_xtrack("settings!"))
+            && $user->scope_allows(TokenScope::S_SETTINGS_READ);
+        $this->edit_allowed = $this->allowed
+            && $user->scope_allows(TokenScope::S_SETTINGS_ADMIN);
         $this->_icollator = new Collator("en_US.utf8");
         $this->_icollator->setAttribute(Collator::NUMERIC_COLLATION, Collator::ON);
         $this->_icollator->setAttribute(Collator::STRENGTH, Collator::SECONDARY);
@@ -482,7 +488,6 @@ class SettingValues extends MessageSet {
     private function decorated_message_list() {
         $lastmi = $prevmi = null;
         $lastloc = [];
-        $this->apply_fmt($this->conf);
         foreach ($this->message_list() as $mi) {
             $mi = clone $mi;
             if ($mi->status === MessageSet::WARNING
@@ -573,7 +578,7 @@ class SettingValues extends MessageSet {
         $si = is_string($id) ? $this->conf->si($id) : $id;
         return $si
             && $si->configurable
-            && $this->allowed
+            && $this->edit_allowed
             && $this->test_si_filter($si);
     }
 
@@ -2170,7 +2175,7 @@ class SettingValues extends MessageSet {
             && ($placeholder = $si->placeholder($this)) !== null) {
             $js["placeholder"] = $placeholder;
         }
-        if ($si->autogrow) {
+        if ($si->autogrow || $si->wrap) {
             $js["class"] = ltrim(($js["class"] ?? "") . " need-autogrow");
         }
         if (!isset($js["spellcheck"])
@@ -2181,6 +2186,13 @@ class SettingValues extends MessageSet {
             && isset($js["placeholder"])
             && $v === (string) $dv) {
             $v = "";
+        }
+        if ($si->wrap) {
+            $js["class"] = Ht::add_tokens($js["class"], "w-text");
+            $js["rows"] = 1;
+            $js["cols"] = $js["size"] ?? 80;
+            unset($js["size"]);
+            return Ht::textarea($name, $v, $js);
         }
         return Ht::entry($name, $v, $js);
     }

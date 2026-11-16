@@ -93,6 +93,221 @@ class ReviewAPI_Tester {
         xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 2);
     }
 
+    function test_post_dry_run_if_warning() {
+        $prow = $this->conf->checked_paper_by_id(18);
+        // an unknown field warns, so `if_warning` withholds the save
+        $qreq = TestQreq::post_json(["object" => "review", "OveMer" => 3, "bogus_field" => 1],
+            ["dry_run" => "if_warning"]);
+        $j = call_api("review", $this->u_diot, $qreq, $prow);
+        xassert_eqq($j->ok, true);
+        xassert_eqq($j->dry_run, true);
+        xassert_eqq($j->valid, true);
+        xassert_eqq($j->change_list, ["s01"]);
+        xassert(!isset($j->review));
+        $prow->load_reviews(true);
+        xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 2);
+
+        // the same save without the warning commits
+        $qreq = TestQreq::post_json(["object" => "review", "OveMer" => 3],
+            ["dry_run" => "if_warning"]);
+        $j = call_api("review", $this->u_diot, $qreq, $prow);
+        xassert_eqq($j->ok, true);
+        xassert_eqq($j->dry_run ?? null, null);
+        xassert_eqq($j->valid, true);
+        xassert_eqq($j->review->OveMer, 3);
+        $prow->load_reviews(true);
+        xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 3);
+        // restore
+        call_api("=review", $this->u_diot, ["r" => "0", "OveMer" => "2", "ready" => "1"], $prow);
+        $prow->load_reviews(true);
+        xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 2);
+    }
+
+    function test_post_if_warning_error() {
+        $prow = $this->conf->checked_paper_by_id(18);
+        // an error is not a warning to be confirmed: the item is withheld *and*
+        // reported invalid, and the request fails
+        $qreq = TestQreq::post_json(["object" => "review", "OveMer" => 9],
+            ["dry_run" => "if_warning"]);
+        $j = call_api("review", $this->u_diot, $qreq, $prow);
+        xassert_eqq($j->ok, true);
+        xassert_eqq($j->dry_run, true);
+        xassert_str_contains(json_encode($j->message_list ?? []), "Invalid value");
+        $prow->load_reviews(true);
+        xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 2);
+    }
+
+    function test_post_dry_run_if_error() {
+        $prow = $this->conf->checked_paper_by_id(18);
+        // a warning is not an error: `if_error` commits despite one
+        $qreq = TestQreq::post_json(["object" => "review", "OveMer" => 3, "bogus_field" => 1],
+            ["dry_run" => "if_error"]);
+        $j = call_api("review", $this->u_diot, $qreq, $prow);
+        xassert_eqq($j->ok, true);
+        xassert_eqq($j->dry_run ?? null, null);
+        xassert_eqq($j->valid, true);
+        xassert_str_contains(json_encode($j->message_list ?? []), "unknown field");
+        $prow->load_reviews(true);
+        xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 3);
+
+        // an error withholds the whole save, which a plain request would have
+        // committed in part
+        $qreq = TestQreq::post_json(["object" => "review", "OveMer" => 1, "RevExp" => 99],
+            ["dry_run" => "if_error"]);
+        $j = call_api("review", $this->u_diot, $qreq, $prow);
+        xassert_eqq($j->dry_run, true);
+        xassert(!isset($j->review));
+        xassert_str_contains(json_encode($j->message_list ?? []), "Invalid value");
+        $prow->load_reviews(true);
+        xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 3);
+
+        // without the mode, the same request saves what it can
+        $j = call_api("review", $this->u_diot,
+            TestQreq::post_json(["object" => "review", "OveMer" => 1, "RevExp" => 99]), $prow);
+        xassert_eqq($j->ok, true);
+        xassert_eqq($j->valid, true);
+        $prow->load_reviews(true);
+        xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 1);
+        // restore
+        call_api("=review", $this->u_diot, ["r" => "0", "OveMer" => "2", "ready" => "1"], $prow);
+        $prow->load_reviews(true);
+        xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 2);
+    }
+
+    function test_post_text_partial_ready_draft() {
+        $prow = $this->conf->checked_paper_by_id(18);
+        $u = $this->conf->checked_user_by_email("varghese@ccrc.wustl.edu");
+        // start a draft review
+        $qreq = TestQreq::post_json(["object" => "review", "email" => $u->email,
+            "OveMer" => 2, "ready" => false], ["r" => "new"]);
+        $j = call_api("review", $this->u_chair, $qreq, $prow);
+        xassert_eqq($j->ok, true);
+        $rid = $j->rid;
+        $prow->load_reviews(true);
+        $rrow = $prow->checked_review_by_user($u);
+        xassert($rrow->reviewStatus < ReviewInfo::RS_DELIVERED);
+
+        // its offline form asks for submission by default; upload one that is
+        // still missing a required entry
+        $dl = call_api_result("review", $this->u_chair,
+            TestQreq::get(["p" => 18, "r" => $rid, "format" => "form"]));
+        xassert($dl instanceof Downloader);
+        $text = $dl->content_string();
+        xassert_str_contains($text, "\nReady\n");
+        $qreq = TestQreq::post(["p" => 18, "dry_run" => "if_error"])
+            ->set_file_content("file", $text, "review.txt", "text/plain");
+        $j = call_api("review", $this->u_chair, $qreq, $prow);
+
+        // the incomplete form warns rather than erroring, so `if_error` commits
+        xassert_eqq($j->ok, true);
+        xassert_eqq($j->dry_run ?? null, null);
+        xassert_eqq($j->valid, true);
+        $ml = $j->message_list ?? [];
+        xassert(!empty($ml));
+        foreach ($ml as $mi) {
+            xassert_eqq($mi->status, MessageSet::WARNING);
+        }
+        xassert_str_contains(json_encode($ml), "be submitted until entries");
+        // and the review is still a draft
+        $prow->load_reviews(true);
+        xassert($prow->checked_review_by_user($u)->reviewStatus < ReviewInfo::RS_DELIVERED);
+
+        // the same shortfall on the web form path is still an error
+        $qreq = TestQreq::post(["p" => 18, "r" => $rid, "ready" => 1, "OveMer" => 2]);
+        $j = call_api("=review", $this->u_chair, $qreq, $prow);
+        xassert_eqq($j->ok, true);
+        xassert_str_contains(json_encode($j->message_list ?? []), "be submitted until entries");
+        $status = 0;
+        foreach ($j->message_list ?? [] as $mi) {
+            $status = max($status, $mi->status);
+        }
+        xassert_eqq($status, MessageSet::ERROR);
+
+        $this->conf->qe("delete from PaperReview where paperId=18 and contactId=?", $u->contactId);
+        $prow->load_reviews(true);
+    }
+
+    /** An offline form uploaded for a specific review (`r`) saves into that
+     * review even when its Reviewer line is gone. */
+    function test_post_text_targets_requested_review() {
+        $prow = $this->conf->checked_paper_by_id(18);
+        $chair = $this->conf->checked_user_by_email("chair@_.com");
+        xassert(!$prow->review_by_user($chair));
+        $rrow = $prow->checked_review_by_user($this->u_diot);
+        $old = $rrow->fidval("s01");
+        $text = file_get_contents(SiteLoader::resolve("test/review18A.txt"));
+        $text = preg_replace('/^==\+== Reviewer:.*\n/m', "", $text);
+        $text = preg_replace('/\n\d\. Weak reject\n/', "\n3. Weak accept\n", $text);
+        $qreq = TestQreq::post(["p" => 18, "r" => (string) $this->r18a_id])
+            ->set_file_content("file", $text, "review18A.txt", "text/plain");
+        $j = call_api("review", $chair, $qreq, $prow);
+        xassert_eqq($j->ok, true);
+        $prow->load_reviews(true);
+        xassert(!$prow->review_by_user($chair));
+        xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 3);
+        // restore
+        call_api("=review", $this->u_diot, ["r" => "0", "OveMer" => (string) $old, "ready" => "1"], $prow);
+        $this->conf->qe("delete from PaperReview where paperId=18 and contactId=?", $chair->contactId);
+        $prow->load_reviews(true);
+        xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), $old);
+
+        // a form naming a reviewer other than `r`'s is refused
+        $other = null;
+        foreach ($this->conf->pc_members() as $pc) {
+            if (!$prow->review_by_user($pc) && !$prow->has_conflict($pc) && !$pc->privChair) {
+                $other = $pc;
+                break;
+            }
+        }
+        xassert(!!$other);
+        xassert_assign($chair, "paper,action,user\n18,primary,{$other->email}\n");
+        $prow->load_reviews(true);
+        $orrow = $prow->checked_review_by_user($other);
+        $text = file_get_contents(SiteLoader::resolve("test/review18A.txt"));
+        $qreq = TestQreq::post(["p" => 18, "r" => (string) $orrow->reviewId])
+            ->set_file_content("file", $text, "review18A.txt", "text/plain");
+        $j = call_api("review", $chair, $qreq, $prow);
+        xassert_eqq($j->ok, false);
+        xassert_str_contains(json_encode($j->message_list), "Reviewer conflict");
+        $prow->load_reviews(true);
+        xassert_lt($prow->checked_review_by_user($other)->reviewStatus, ReviewInfo::RS_COMPLETED);
+        xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), $old);
+        xassert_assign($chair, "paper,action,user\n18,clearreview,{$other->email}\n");
+    }
+
+    function test_post_text_if_warning() {
+        $prow = $this->conf->checked_paper_by_id(18);
+        $text = file_get_contents(SiteLoader::resolve("test/review18A.txt"));
+        // a draft with no overall merit warns (that entry is required), so
+        // `if_warning` withholds the upload
+        $draft = str_replace(["\nReady\n", "\n2. Weak reject\n"], ["\n\n", "\n\n"], $text);
+        $qreq = TestQreq::post(["p" => 18, "dry_run" => "if_warning"])
+            ->set_file_content("file", $draft, "review18A.txt", "text/plain");
+        $j = call_api("review", $this->u_diot, $qreq, $prow);
+        xassert_eqq($j->ok, true);
+        xassert_eqq($j->dry_run, true);
+        xassert_eqq($j->valid, true);
+        $prow->load_reviews(true);
+        $rrow = $prow->checked_review_by_user($this->u_diot);
+        xassert_eq($rrow->fidval("s01"), 2);
+        xassert_eqq($rrow->reviewStatus, ReviewInfo::RS_COMPLETED);
+
+        // a form that warns about nothing commits under `if_warning`
+        $modified = str_replace("2. Weak reject", "3. Weak accept", $text);
+        $qreq = TestQreq::post(["p" => 18, "dry_run" => "if_warning"])
+            ->set_file_content("file", $modified, "review18A.txt", "text/plain");
+        $j = call_api("review", $this->u_diot, $qreq, $prow);
+        xassert_eqq($j->ok, true);
+        xassert_eqq($j->dry_run ?? null, null);
+        xassert_eqq($j->review->OveMer, 3);
+        $prow->load_reviews(true);
+        xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 3);
+        // restore
+        call_api("=review", $this->u_diot, ["r" => "0", "OveMer" => "2", "ready" => "1"], $prow);
+        $prow->load_reviews(true);
+        xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 2);
+    }
+
     function test_post_conflict() {
         $prow = $this->conf->checked_paper_by_id(18);
         $rr = $prow->checked_review_by_user($this->u_diot);
@@ -124,7 +339,7 @@ class ReviewAPI_Tester {
         $qreq = TestQreq::post_json(["object" => "review", "pid" => 17, "OveMer" => 1]);
         $j = call_api("review", $this->u_diot, $qreq, $prow);
         xassert_eqq($j->ok, false);
-        xassert(str_contains(json_encode($j->message_list ?? []), "does not match"));
+        xassert_str_contains(json_encode($j->message_list ?? []), "does not match");
         $prow->load_reviews(true);
         xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 2);
     }
@@ -150,7 +365,7 @@ class ReviewAPI_Tester {
         $qreq = TestQreq::post_json(["object" => "review", "OveMer" => 1]);
         $j = call_api("review", $this->u_diot, $qreq, null);
         xassert_eqq($j->ok, false);
-        xassert(str_contains(json_encode($j->message_list ?? []), "Submission ID required"));
+        xassert_str_contains(json_encode($j->message_list ?? []), "Submission ID required");
     }
 
     function test_post_rid_mismatch() {
@@ -161,7 +376,7 @@ class ReviewAPI_Tester {
         $qreq = TestQreq::post_json(["object" => "review", "rid" => $erow->reviewId, "OveMer" => 1], ["r" => "18A"]);
         $j = call_api("review", $this->u_chair, $qreq, $prow);
         xassert_eqq($j->ok, false);
-        xassert(str_contains(json_encode($j->message_list ?? []), "Review ID does not match"));
+        xassert_str_contains(json_encode($j->message_list ?? []), "Review ID does not match");
     }
 
     function test_post_rid_confirms() {
@@ -215,16 +430,87 @@ class ReviewAPI_Tester {
         $j = call_api("=review", $this->u_diot, ["r" => (string) $erow->reviewId, "OveMer" => "1", "ready" => "1"], $prow);
         xassert_eqq($j->ok, false);
         xassert_eqq($j->valid, false);
-        xassert(str_contains(json_encode($j->message_list ?? []), "not yet ready"));
+        xassert_str_contains(json_encode($j->message_list ?? []), "not yet ready");
         // ...or by `rid` in a JSON body (which prepare_save resolves)
         $qreq = TestQreq::post_json(["object" => "review", "rid" => $erow->reviewId, "OveMer" => 1]);
         $j = call_api("review", $this->u_diot, $qreq, $prow);
         xassert_eqq($j->ok, false);
         xassert_eqq($j->valid, false);
-        xassert(str_contains(json_encode($j->message_list ?? []), "not yet ready"));
+        xassert_str_contains(json_encode($j->message_list ?? []), "not yet ready");
         // estrin's review is untouched
         $prow->load_reviews(true);
         xassert_eqq($prow->review_by_user($this->u_estrin)->reviewTime, $etime);
+    }
+
+    function test_post_unreleased_assignment() {
+        // a hidden (ghost) assignment isn’t the reviewer’s to edit or adopt
+        $pid = null;
+        foreach ($this->conf->paper_set(["where" => "timeSubmitted>0"], $this->u_chair) as $prow) {
+            if (!$prow->review_by_user($this->u_diot)
+                && !$prow->has_conflict($this->u_diot)) {
+                $pid = $prow->paperId;
+                break;
+            }
+        }
+        xassert($pid !== null);
+        xassert_assign($this->u_chair, "paper,action,email,ghost\n{$pid},primary,{$this->u_diot->email},yes\n");
+        $prow = $this->conf->checked_paper_by_id($pid);
+        $rrow = $prow->review_by_user($this->u_diot);
+        xassert($rrow && $rrow->is_ghost());
+        $diot = $this->conf->checked_user_by_email($this->u_diot->email);
+        xassert(!$diot->can_edit_review($prow, $rrow));
+
+        foreach ([["OveMer" => "2", "ready" => "0", "dry_run" => "1"],
+                  ["OveMer" => "2", "ready" => "0"]] as $args) {
+            $j = call_api("=review", $diot, $args, $diot->checked_paper_by_id($pid));
+            xassert_eqq($j->ok, false);
+            $t = json_encode($j, JSON_UNESCAPED_UNICODE);
+            xassert_str_contains($t, "hasn’t been released");
+            xassert_not_str_contains($t, "primary");
+        }
+        // addressing it by ID is refused without describing it
+        $j = call_api("=review", $diot, ["r" => (string) $rrow->reviewId, "OveMer" => "2", "ready" => "0"], $diot->checked_paper_by_id($pid));
+        xassert_eqq($j->ok, false);
+        xassert_not_str_contains(json_encode($j), "primary");
+
+        // with self-assignment off, the refusal matches that for a PC member
+        // with no assignment
+        $other = null;
+        foreach ($this->conf->pc_members() as $pc) {
+            if ($pc->contactId !== $this->u_diot->contactId
+                && !$pc->privChair
+                && !$prow->review_by_user($pc)
+                && !$prow->has_conflict($pc)) {
+                $other = $pc;
+                break;
+            }
+        }
+        xassert(!!$other);
+        $old_pcrev_any = $this->conf->setting("pcrev_any");
+        $this->conf->save_refresh_setting("pcrev_any", null);
+        $args = ["OveMer" => "2", "ready" => "0"];
+        $diot = $this->conf->checked_user_by_email($this->u_diot->email);
+        $other = $this->conf->checked_user_by_email($other->email);
+        $jd = call_api("=review", $diot, $args, $diot->checked_paper_by_id($pid));
+        $jo = call_api("=review", $other, $args, $other->checked_paper_by_id($pid));
+        xassert_eqq($jd->ok, false);
+        xassert_eqq($jo->ok, false);
+        xassert_eqq(json_encode($jd->message_list), json_encode($jo->message_list));
+        $this->conf->save_refresh_setting("pcrev_any", $old_pcrev_any);
+
+        // the assignment is unchanged, and an administrator can still edit it
+        $prow = $this->conf->checked_paper_by_id($pid);
+        $rrow = $prow->review_by_user($this->u_diot);
+        xassert($rrow && $rrow->is_ghost());
+        xassert_eqq($rrow->reviewType, REVIEW_PRIMARY);
+        xassert($this->u_chair->can_edit_review($prow, $rrow));
+        $j = call_api("=review", $this->u_chair, ["r" => (string) $rrow->reviewId, "OveMer" => "2", "ready" => "0"], $prow);
+        xassert_eqq($j->ok, true);
+        $prow = $this->conf->checked_paper_by_id($pid);
+        $rrow = $prow->review_by_user($this->u_diot);
+        xassert_eqq($rrow->reviewType, REVIEW_PRIMARY);
+        xassert_eq($rrow->fidval("s01"), 2);
+        xassert($rrow->delete($this->u_chair));
     }
 
     function test_review_hidden_from_author() {
@@ -235,19 +521,20 @@ class ReviewAPI_Tester {
         $author = $this->conf->checked_user_by_email("cheshire@cs.stanford.edu");
         xassert($author->can_view_paper($prow));
         xassert(!$author->can_view_review_assignment($prow, $rrow));
-        // so the review's existence is hidden as a 404 “not found”,
-        // indistinguishable from a nonexistent review id...
-        $jr = call_api_result("review", $author, TestQreq::get(["p" => 18, "r" => (string) $rrow->reviewId]));
-        xassert_eqq($jr->status, 404);
-        xassert(str_contains(json_encode($jr->content["message_list"] ?? []), "not found"));
-        $jr = call_api_result("review", $author, TestQreq::get(["p" => 18, "r" => "99999"]));
-        xassert_eqq($jr->status, 404);
-        xassert(str_contains(json_encode($jr->content["message_list"] ?? []), "not found"));
+        // so the response explains why the author can’t see reviews on this
+        // paper at all — a fact about the author, not about any review id —
+        // and is identical for a nonexistent review id...
+        $jr1 = call_api_result("review", $author, TestQreq::get(["p" => 18, "r" => (string) $rrow->reviewId]));
+        $jr2 = call_api_result("review", $author, TestQreq::get(["p" => 18, "r" => "99999"]));
+        xassert_eqq($jr1->status, 403);
+        xassert_eqq($jr2->status, 403);
+        xassert_eqq(json_encode($jr1->content["message_list"] ?? []), json_encode($jr2->content["message_list"] ?? []));
+        xassert_str_contains(json_encode($jr1->content["message_list"] ?? []), "currently view reviews for submission #18");
         // ...for every `format`, which cannot bypass the permission check
         foreach (["text", "form"] as $fmt) {
             $jr = call_api_result("review", $author, TestQreq::get(["p" => 18, "r" => (string) $rrow->reviewId, "format" => $fmt]));
             xassert($jr instanceof JsonResult);
-            xassert_eqq($jr->status, 404);
+            xassert_eqq($jr->status, 403);
         }
         // a multiple-review download gives the author nothing
         foreach (["text", "textzip"] as $fmt) {
@@ -257,8 +544,8 @@ class ReviewAPI_Tester {
         }
         // ...on POST too (attempting to edit it by `r`)
         $jr = call_api_result("=review", $author, ["r" => (string) $rrow->reviewId, "OveMer" => "1", "ready" => "1"], $prow);
-        xassert_eqq($jr->status, 404);
-        xassert(str_contains(json_encode($jr->content["message_list"] ?? []), "not found"));
+        xassert_eqq($jr->status, 403);
+        xassert_str_contains(json_encode($jr->content["message_list"] ?? []), "currently view reviews for submission #18");
         // an administrator can still fetch the review
         $j = call_api("review", $this->u_chair, TestQreq::get(["p" => 18, "r" => (string) $rrow->reviewId]));
         xassert_eqq($j->ok, true);
@@ -279,12 +566,12 @@ class ReviewAPI_Tester {
         $j = call_api("=review", $this->u_chair, ["r" => (string) $orid, "OveMer" => "1"], $prow);
         xassert_eqq($j->ok, false);
         xassert_eqq($j->status_code, 404);
-        xassert(str_contains(json_encode($j->message_list ?? []), "not found"));
+        xassert_str_contains(json_encode($j->message_list ?? []), "not found");
         // and likewise via a JSON body `rid`
         $qreq = TestQreq::post_json(["object" => "review", "rid" => $orid, "OveMer" => 1]);
         $j = call_api("review", $this->u_chair, $qreq, $prow);
         xassert_eqq($j->ok, false);
-        xassert(str_contains(json_encode($j->message_list ?? []), "not found"));
+        xassert_str_contains(json_encode($j->message_list ?? []), "not found");
     }
 
     function test_post_text_upload() {
@@ -307,6 +594,26 @@ class ReviewAPI_Tester {
         xassert_eqq($j->ok, true);
         $prow->load_reviews(true);
         xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 2);
+    }
+
+    function test_post_blank_text_upload() {
+        $prow = $this->conf->checked_paper_by_id(18);
+        // estrin's assigned review on #18 is empty, so this downloads a blank form
+        $dl = call_api_result("review", $this->u_estrin,
+            TestQreq::get(["p" => 18, "format" => "form"]));
+        xassert($dl instanceof Downloader);
+        // uploading it unchanged saves nothing, but must still say why
+        $qreq = TestQreq::post(["p" => 18, "dry_run" => "if_error"])
+            ->set_file_content("file", $dl->content_string(), "review.txt", "text/plain");
+        $j = call_api("review", $this->u_estrin, $qreq, $prow);
+        xassert_eqq($j->ok, false);
+        xassert_eqq($j->valid, false);
+        xassert_eqq($j->change_list, []);
+        xassert(!empty($j->message_list ?? []));
+        xassert_str_contains(json_encode($j->message_list), "Ignored blank");
+        $prow->load_reviews(true);
+        xassert_eqq($prow->checked_review_by_user($this->u_estrin)->reviewStatus,
+                    ReviewInfo::RS_EMPTY);
     }
 
     function test_post_text_body() {
@@ -412,7 +719,7 @@ class ReviewAPI_Tester {
             ->set_file_content("file", $other, "review.txt", "text/plain");
         $j = call_api("review", $this->u_diot, $qreq, $prow);
         xassert_eqq($j->ok, false);
-        xassert(str_contains(json_encode($j->message_list ?? []), "not for this"));
+        xassert_str_contains(json_encode($j->message_list ?? []), "not for this");
         // diot's paper 18 review is untouched
         $prow->load_reviews(true);
         xassert_eq($prow->checked_review_by_user($this->u_diot)->fidval("s01"), 2);
@@ -580,17 +887,32 @@ class ReviewAPI_Tester {
         $prow->load_reviews(true);
         xassert(!!$prow->review_by_user($var));
 
-        // real delete
+        // real delete reports the deleted review's id
+        $ordid = $rrow->unparse_ordinal_id();
         $j = call_api("review", $this->u_chair, TestQreq::delete(["p" => 18, "r" => $rid]), $prow);
         xassert_eqq($j->ok, true);
         xassert_eqq($j->valid, true);
         xassert_eqq($j->change_list, ["delete"]);
+        xassert_eqq($j->rid, $ordid);
         $prow->load_reviews(true);
         xassert(!$prow->review_by_user($var));
 
         // deleting again → not found
         $jr = call_api_result("review", $this->u_chair, TestQreq::delete(["p" => 18, "r" => $rid]), $prow);
         xassert_eqq($jr->status, 404);
+
+        // deleting a review that has no ordinal reports its numeric id
+        $qreq = TestQreq::post_json(["object" => "review", "email" => $var->email,
+            "OveMer" => 2], ["r" => "new"]);
+        $j = call_api("review", $this->u_chair, $qreq, $prow);
+        xassert_eqq($j->ok, true);
+        $prow->load_reviews(true);
+        $rrow = $prow->review_by_user($var);
+        xassert(!!$rrow && !$rrow->reviewOrdinal);
+        $rid = (string) $rrow->reviewId;
+        $j = call_api("review", $this->u_chair, TestQreq::delete(["p" => 18, "r" => $rid]), $prow);
+        xassert_eqq($j->ok, true);
+        xassert_eqq($j->rid, "18r{$rid}");
     }
 
     /** @param int $cid
@@ -680,6 +1002,7 @@ class ReviewAPI_Tester {
 
     function test_create_review_type_nonadmin_default() {
         // enable PC self-assignment
+        $pcrev_any = $this->conf->setting("pcrev_any");
         $this->conf->save_setting("pcrev_any", 1);
         $this->conf->refresh_settings();
         $prow = $this->conf->checked_paper_by_id(18);
@@ -704,8 +1027,29 @@ class ReviewAPI_Tester {
         xassert_str_contains(json_encode($j->message_list ?? []), "administrator can set the review type");
         xassert_eqq($this->conf->fetch_ivalue("select count(*) from PaperReview where paperId=18 and contactId=?", $cid), 0);
 
-        $this->conf->save_setting("pcrev_any", null);
+        $this->conf->save_setting("pcrev_any", $pcrev_any);
         $this->conf->refresh_settings();
+    }
+
+    function test_review_type_error_hides_type() {
+        // a user who can view but not edit a review learns nothing about its type
+        $old_viewrev = $this->conf->setting("viewrev");
+        $this->conf->save_refresh_setting("viewrev", 1);
+        $prow = $this->conf->checked_paper_by_id(18);
+        $rrow = $prow->review_by_id($this->r18a_id);
+        xassert(!$this->u_estrin->is_owned_review($prow, $rrow));
+        xassert(!$this->u_estrin->can_manage_reviews($prow));
+        xassert($this->u_estrin->can_view_review($prow, $rrow));
+        $answers = [];
+        foreach (["primary", "secondary", "pc", "external", "meta"] as $rtype) {
+            $qreq = TestQreq::post_json(["object" => "review", "review_type" => $rtype], ["r" => $this->r18a_id]);
+            $j = call_api("review", $this->u_estrin, $qreq, $prow);
+            xassert_eqq($j->ok, false);
+            $answers[$rtype] = json_encode($j->message_list ?? []);
+        }
+        xassert_eqq(count(array_unique($answers)), 1);
+        xassert_str_contains($answers["pc"], "permission to edit this review");
+        $this->conf->save_refresh_setting("viewrev", $old_viewrev);
     }
 
     function test_fetch() {
@@ -933,6 +1277,7 @@ class ReviewAPI_Tester {
 
         // hide reviewer identities from the PC: a name is subject to the same
         // kind of bound as a field
+        $viewrevid = $conf->setting("viewrevid");
         $conf->save_refresh_setting("viewrevid", Conf::VIEWREV_NEVER);
         xassert($this->u_chair->can_view_review_identity($prow, $rrow));
         xassert(!$u_other->can_view_review_identity($prow, $rrow));
@@ -979,7 +1324,7 @@ class ReviewAPI_Tester {
         xassert($sv->execute());
         xassert(!$conf->review_field("t09"));
         $conf->save_refresh_setting("viewrev", null);
-        $conf->save_refresh_setting("viewrevid", null);
+        $conf->save_refresh_setting("viewrevid", $viewrevid);
     }
 
     // A reviewer must not write a field they cannot see. The render path hides
@@ -1154,6 +1499,7 @@ class ReviewAPI_Tester {
         $diot = $this->u_diot;
 
         // the PC may read every review, but never a reviewer's identity
+        $viewrevid = $conf->setting("viewrevid");
         $conf->save_refresh_setting("viewrev", Conf::VIEWREV_ALWAYS);
         $conf->save_refresh_setting("viewrevid", Conf::VIEWREV_NEVER);
         $prow = $conf->checked_paper_by_id(18);
@@ -1248,7 +1594,7 @@ class ReviewAPI_Tester {
         xassert_str_contains($refusals[0], "permission to edit this review");
 
         $conf->save_refresh_setting("viewrev", null);
-        $conf->save_refresh_setting("viewrevid", null);
+        $conf->save_refresh_setting("viewrevid", $viewrevid);
     }
 
     // `u` names the reviewer for a POST whose data does not name one

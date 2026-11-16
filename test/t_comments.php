@@ -129,7 +129,7 @@ class Comments_Tester {
 
         $j = call_api("=comment", $this->u_floyd, ["c" => "new", "text" => "Nope"], $paper1);
         xassert(!$j->ok);
-        xassert_match($j->message_list[0]->message, '/didn’t write this comment/');
+        xassert_match($j->message_list[0]->message, '/aren’t allowed to comment/');
 
         $j = call_api("=comment", $this->u_chair, ["c" => "new", "text" => "Yep"], $paper1);
         xassert($j->ok);
@@ -212,8 +212,8 @@ class Comments_Tester {
         $pos1a = strpos($cmtj->text, "@Lixia");
         $pos1b = strpos($cmtj->text, "@Reviewer B");
         xassert_eqq($cmtj->my_mentions,
-            [[$lixia->contactId, $pos1a, $pos1a + strlen("@Lixia Zhang"), true],
-             [$lixia->contactId, $pos1b, $pos1b + strlen("@Reviewer B"), false]]);
+            [[$lixia->contactId, $pos1a, $pos1a + strlen("@Lixia Zhang"), 9],
+             [$lixia->contactId, $pos1b, $pos1b + strlen("@Reviewer B"), 8]]);
 
         $mgbaker = $this->conf->checked_user_by_email("mgbaker@cs.stanford.edu");
         xassert($mgbaker->can_view_comment($paper1, $cmt));
@@ -222,8 +222,8 @@ class Comments_Tester {
         $pos1a = strpos($cmtj->text, "@Reviewer A");
         $pos1b = strpos($cmtj->text, "@Mary");
         xassert_eqq($cmtj->my_mentions,
-            [[$mgbaker->contactId, $pos1a, $pos1a + strlen("@Reviewer A"), false],
-             [$mgbaker->contactId, $pos1b, $pos1b + strlen("@Mary Baker"), true]]);
+            [[$mgbaker->contactId, $pos1a, $pos1a + strlen("@Reviewer A"), 8],
+             [$mgbaker->contactId, $pos1b, $pos1b + strlen("@Mary Baker"), 9]]);
 
         $diot = $this->conf->checked_user_by_email("christophe.diot@sophia.inria.fr");
         xassert($diot->can_view_comment($paper1, $cmt));
@@ -231,12 +231,172 @@ class Comments_Tester {
         xassert_eqq($cmtj->text, "Hello @Reviewer A @Reviewer B @Reviewer B @Reviewer A @Christophe Diot");
         $pos1a = strpos($cmtj->text, "@Chr");
         xassert_eqq($cmtj->my_mentions,
-            [[$diot->contactId, $pos1a, $pos1a + strlen("@Christophe Diot"), true]]);
+            [[$diot->contactId, $pos1a, $pos1a + strlen("@Christophe Diot"), 3]]);
 
         MailChecker::check_db("t_comments-mention-censor");
 
         $this->conf->save_setting("viewrev", null);
         $this->conf->save_refresh_setting("tracks", null);
+    }
+
+    function test_mention_censor_hides_authorship() {
+        // A PC reviewer who cannot see paper 1’s authors mentions Estrin, a
+        // PC member who is one of them. The censored form shown to another
+        // reviewer must not reveal that relationship.
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        $this->conf->save_setting("viewrev", Conf::VIEWREV_UNLESSINCOMPLETE);
+        $this->conf->save_setting("cmt_revid", 1); // comments visible though identities hidden
+        $this->conf->save_refresh_setting("tracks", 1, ["_" => ["viewrevid" => "+none"]]);
+        $lixia = $this->conf->checked_user_by_email("lixia@cs.ucla.edu");
+        $estrin = $this->conf->checked_user_by_email("estrin@usc.edu");
+        xassert($estrin->isPC && $paper1->has_author($estrin));
+        xassert(!$lixia->can_view_authors($paper1));
+
+        $j = call_api("=comment", $lixia, ["c" => "new", "text" => "Hi @Deborah Estrin"], $paper1);
+        xassert($j->ok);
+        $paper1->load_comments();
+        $cmt = $paper1->comment_by_id($j->comment->cid);
+        xassert_eqq($cmt->unparse_json($lixia)->text, "Hi @Deborah Estrin");
+
+        $diot = $this->conf->checked_user_by_email("christophe.diot@sophia.inria.fr");
+        xassert(!$diot->can_view_authors($paper1));
+        xassert(!$diot->can_view_review_identity($paper1, null));
+        xassert_eqq($cmt->unparse_json($diot)->text, "Hi @Anonymous");
+
+        MailChecker::clear();
+        $this->conf->save_setting("viewrev", null);
+        $this->conf->save_setting("cmt_revid", null);
+        $this->conf->save_refresh_setting("tracks", null);
+    }
+
+    /** A former shepherd's author-visible comment must not let the paper's
+     * authors link the shepherd's revealed name to the blind review's ordinal.
+     * The comment JSON may show the shepherd's name (shepherd identity is
+     * author-visible) but must omit the review pseudonym ("Reviewer A") for a
+     * viewer who can see who wrote the comment yet not the identity of that
+     * person's review. */
+    function test_shepherd_comment_hides_review_pseudonym() {
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        $this->ensure_paper1_review($paper1);   // mgbaker: Reviewer A, blind
+
+        // capture settings so they can be restored exactly (e.g. `rev_blind`
+        // is read unconditionally by Conf::review_blindness)
+        $old = [];
+        foreach (["au_seerev", "rev_blind", "shepherd_hide", "au_seedec"] as $s) {
+            $old[$s] = $this->conf->setting($s);
+        }
+        $this->conf->save_setting("au_seerev", Conf::AUSEEREV_YES);
+        $this->conf->save_setting("rev_blind", Conf::BLIND_ALWAYS);
+        $this->conf->save_refresh_setting("shepherd_hide", null); // 0: authors see shepherd
+        $this->conf->save_refresh_setting("au_seedec", 1);        // authors see decisions (derived cache)
+
+        // a decision lets the paper's authors view the shepherd (can_view_shepherd)
+        xassert_assign($this->u_chair, "paper,action,decision\n1,decision,accept\n");
+
+        // mgbaker becomes shepherd and writes an author-visible comment
+        xassert_assign($this->u_chair, "paper,action,email\n1,shepherd,mgbaker@cs.stanford.edu\n");
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        $j = call_api("=comment", $this->u_mgbaker,
+            ["c" => "new", "text" => "Hello authors, I will shepherd your paper.",
+             "visibility" => "au", "topic" => "rev"], $paper1);
+        xassert($j->ok);
+        $cid = $j->comment->cid;
+
+        // the shepherd is reassigned; mgbaker is now a *former* shepherd
+        xassert_assign($this->u_chair, "paper,action,email\n1,shepherd,lixia@cs.ucla.edu\n");
+
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        $paper1->load_comments();
+        $cmt = $paper1->comment_by_id($cid);
+        xassert(!!$cmt);
+        $rrow = $paper1->review_by_user($this->u_mgbaker);
+
+        // preconditions: an author sees the comment and the shepherd's name,
+        // but not the (blind) review's identity
+        $author = $this->conf->checked_user_by_email("puneet@catarina.usc.edu");
+        xassert($author->can_view_comment($paper1, $cmt));
+        xassert($author->can_view_comment_identity($paper1, $cmt));
+        xassert(!$author->can_view_review_identity($paper1, $rrow));
+
+        // the leak: name is shown, but the review pseudonym must not be
+        $cj = $cmt->unparse_json($author);
+        xassert_eqq($cj->author ?? null, "Mary Baker");
+        xassert(!isset($cj->author_pseudonym));
+
+        // control: a viewer who may view the review identity (chair) still gets
+        // both, so the fix does not over-suppress
+        xassert($this->u_chair->can_view_review_identity($paper1, $rrow));
+        $cjc = $cmt->unparse_json($this->u_chair);
+        xassert_eqq($cjc->author_pseudonym ?? null, "Reviewer A");
+
+        // cleanup: restore settings to their prior values
+        xassert_assign($this->u_chair, "paper,action,email\n1,shepherd,none\n");
+        $this->conf->save_setting("au_seerev", $old["au_seerev"]);
+        $this->conf->save_setting("rev_blind", $old["rev_blind"]);
+        $this->conf->save_refresh_setting("shepherd_hide", $old["shepherd_hide"]);
+        $this->conf->save_refresh_setting("au_seedec", $old["au_seedec"]);
+    }
+
+    // A reviewer's pseudonymous comment must never be grouped with a named
+    // comment by the same person (e.g. one written later as shepherd): the
+    // grouped summary would link "Reviewer A" to the name
+    function test_pseudonymous_comment_grouped_separately() {
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        $this->ensure_paper1_review($paper1);   // mgbaker: Reviewer A, blind
+        $old = [];
+        foreach (["au_seerev", "rev_blind", "shepherd_hide", "au_seedec"] as $s) {
+            $old[$s] = $this->conf->setting($s);
+        }
+        $this->conf->save_setting("au_seerev", Conf::AUSEEREV_YES);
+        $this->conf->save_setting("rev_blind", Conf::BLIND_ALWAYS);
+        $this->conf->save_refresh_setting("shepherd_hide", null);
+        $this->conf->save_refresh_setting("au_seedec", 1);
+        xassert_assign($this->u_chair, "paper,action,email\n1,shepherd,none\n");
+
+        // as a plain reviewer, mgbaker's comment is pseudonymous to authors
+        $j = call_api("=comment", $this->u_mgbaker,
+            ["c" => "new", "text" => "A reviewer comment.", "visibility" => "au", "topic" => "rev"], $paper1);
+        xassert($j->ok);
+        $c1 = $j->comment->cid;
+
+        // as shepherd, mgbaker's next comment is named to authors
+        xassert_assign($this->u_chair, "paper,action,decision\n1,decision,accept\n");
+        xassert_assign($this->u_chair, "paper,action,email\n1,shepherd,mgbaker@cs.stanford.edu\n");
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        $j = call_api("=comment", $this->u_mgbaker,
+            ["c" => "new", "text" => "A shepherd comment.", "visibility" => "au", "topic" => "rev"], $paper1);
+        xassert($j->ok);
+        $c2 = $j->comment->cid;
+
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        $author = $this->conf->checked_user_by_email("puneet@catarina.usc.edu");
+        $cm1 = $paper1->comment_by_id($c1);
+        $cm2 = $paper1->comment_by_id($c2);
+        xassert(!$author->can_view_comment_identity($paper1, $cm1));
+        xassert_eqq($cm1->unparse_json($author)->author_pseudonym ?? null, "Reviewer A");
+        xassert($author->can_view_comment_identity($paper1, $cm2));
+
+        // every group is either all named or all pseudonymous to the author
+        $crows = $paper1->viewable_comments($author);
+        $named = $pseud = $gnamed = $gpseud = 0;
+        foreach ($crows as $cr) {
+            $author->can_view_comment_identity($paper1, $cr) ? ++$named : ++$pseud;
+        }
+        foreach (CommentInfo::group_by_identity($crows, $author, true) as $g) {
+            $author->can_view_comment_identity($paper1, $g[0]) ? $gnamed += $g[1] : $gpseud += $g[1];
+        }
+        xassert_gt($named, 0);
+        xassert_gt($pseud, 0);
+        xassert_eqq([$gnamed, $gpseud], [$named, $pseud]);
+
+        // cleanup
+        call_api("=comment", $this->u_chair, ["c" => (string) $c1, "delete" => 1], $paper1);
+        call_api("=comment", $this->u_chair, ["c" => (string) $c2, "delete" => 1], $paper1);
+        xassert_assign($this->u_chair, "paper,action,email\n1,shepherd,none\n");
+        $this->conf->save_setting("au_seerev", $old["au_seerev"]);
+        $this->conf->save_setting("rev_blind", $old["rev_blind"]);
+        $this->conf->save_refresh_setting("shepherd_hide", $old["shepherd_hide"]);
+        $this->conf->save_refresh_setting("au_seedec", $old["au_seedec"]);
     }
 
     function test_attachments() {
@@ -332,6 +492,68 @@ class Comments_Tester {
         xassert(!$cmt->has_attachments());
     }
 
+    // A PC-only comment’s attachment must not be reachable by requesting it
+    // under a different document type. The /api/document existence oracle came
+    // from PaperInfo::document materialising the DTYPE_COMMENT row for a dt=0
+    // (submission) request, letting a viewer who can’t see the comment tell its
+    // docid from a nonexistent one.
+    function test_hidden_comment_attachment_docid_not_oracle() {
+        $paper1 = $this->conf->checked_paper_by_id(1);
+
+        // chair posts a PC-only comment with an attachment
+        $qreq = new Qrequest("POST", ["c" => "new", "text" => "PC eyes only", "visibility" => "pc", "attachment:1" => "new"]);
+        $qreq->approve_token();
+        $qreq->set_file_content("attachment:1:file", "secret", "s.txt", "text/plain");
+        $j = call_api("=comment", $this->u_chair, $qreq, $paper1);
+        xassert($j->ok);
+        $cid = (int) $j->comment->cid;
+        $attach_docid = (int) $j->comment->docs[0]->docid;
+        xassert_gt($attach_docid, 1);
+
+        // an author of paper 1 cannot see the PC-only comment
+        $paper1->load_comments();
+        $cmt = $paper1->comment_by_id($cid);
+        xassert(!!$cmt);
+        xassert(!$this->u_floyd->can_view_comment($paper1, $cmt));
+
+        // asking for the comment attachment as a submission document must find
+        // nothing, so a dt=0 probe cannot confirm the row exists…
+        $fresh = $this->conf->checked_paper_by_id(1);
+        xassert_eqq($fresh->document(DTYPE_SUBMISSION, $attach_docid, true), null);
+        xassert_eqq($fresh->document(DTYPE_FINAL, $attach_docid, true), null);
+        // …while the legitimate comment-attachment lookup still resolves it
+        $cdoc = $fresh->document(DTYPE_COMMENT, $attach_docid, true);
+        xassert(!!$cdoc);
+        xassert_eqq($cdoc->paperStorageId, $attach_docid);
+
+        call_api("=comment", $this->u_chair, ["c" => (string) $cid, "delete" => 1], $paper1);
+    }
+
+    // a comment attachment’s history lists only that comment’s attachments
+    function test_attachment_history_per_comment() {
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        $cids = $docids = [];
+        foreach (["a", "b"] as $name) {
+            $qreq = new Qrequest("POST", ["c" => "new", "text" => "Attached {$name}", "attachment:1" => "new"]);
+            $qreq->approve_token();
+            $qreq->set_file_content("attachment:1:file", "File {$name}", "{$name}.txt", "text/plain");
+            $j = call_api("=comment", $this->u_chair, $qreq, $paper1);
+            xassert($j->ok);
+            $cids[] = (int) $j->comment->cid;
+            $docids[] = $j->comment->docs[0]->docid;
+        }
+
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        xassert($this->u_chair->can_view_document_history($paper1));
+        $j = call_api("documentlist", $this->u_chair, ["p" => "1", "dt" => "comment-cx{$cids[0]}", "attachment" => "a.txt", "history" => "1"], $paper1);
+        xassert($j->ok);
+        xassert_eqq(array_map(function ($dj) { return $dj->docid; }, $j->document_history), [$docids[0]]);
+
+        foreach ($cids as $cid) {
+            call_api("=comment", $this->u_chair, ["c" => (string) $cid, "delete" => 1], $paper1);
+        }
+    }
+
     function test_plain_comment_visibility_topic() {
         $paper1 = $this->conf->checked_paper_by_id(1);
 
@@ -376,6 +598,38 @@ class Comments_Tester {
         xassert(!isset($j->comment->text));
 
         MailChecker::clear();
+    }
+
+    /** Dry-run a reviewer-only comment on paper 1 and report whether the
+     * "intended for authors" warning fires.
+     * @param string $text
+     * @return bool */
+    private function author_salutation_warning($text) {
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        $j = call_api("=comment", $this->u_chair, ["c" => "new", "text" => $text, "visibility" => "rev", "dry_run" => "1"], $paper1);
+        xassert($j->ok);
+        foreach ($j->message_list ?? [] as $mi) {
+            if (($mi->field ?? null) === "visibility"
+                && str_starts_with($mi->message ?? "", "<0>This comment appears")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function test_author_salutation_warning() {
+        // salutations addressed to the authors
+        xassert($this->author_salutation_warning("Dear authors,\n\nThe committee has decided to reject this paper."));
+        xassert($this->author_salutation_warning("### Decision Rationale\n\nDear authors,\n\nThe committee has decided to reject this paper."));
+        xassert($this->author_salutation_warning("Authors,\n\nThe badge requirement was marked incorrectly; that has been fixed."));
+        xassert($this->author_salutation_warning("Hi authors, will the build scripts be added to the artifact?"));
+        xassert($this->author_salutation_warning("Comments for authors:\n\nThe reviewers agree the paper is not ready."));
+        // salutations to colleagues, or third-person prose about the authors
+        xassert(!$this->author_salutation_warning("Dear @Mary Baker - the authors have submitted a revision. Could you take a look?"));
+        xassert(!$this->author_salutation_warning("DRAFT\n\nDear authors, the committee has decided to reject this paper."));
+        xassert(!$this->author_salutation_warning("Author-suggested reviewers: Sally Floyd, Mary Baker"));
+        xassert(!$this->author_salutation_warning("Hello, authors have not fully addressed the revision comments."));
+        xassert(!$this->author_salutation_warning("Comments for authors look fine to me."));
     }
 
     function test_comment_blind() {
@@ -604,6 +858,346 @@ class Comments_Tester {
             "has_response" => "1", "response_active" => "0", "response/1/id" => "1"
         ]);
         xassert($sv->execute());
+    }
+
+    /** @return string */
+    private function last_paper_log_action(PaperInfo $prow) {
+        return $this->conf->fetch_value("select action from ActionLog where paperId=? order by logId desc limit 1", $prow->paperId);
+    }
+
+    function test_comment_log_verbs() {
+        $paper1 = $this->open_clean_response_round();
+
+        // new comment, then an edit
+        $j = call_api("=comment", $this->u_chair, ["c" => "new", "text" => "Log verb comment", "visibility" => "rev"], $paper1);
+        xassert($j->ok);
+        $cid = (int) $j->comment->cid;
+        xassert_eqq($this->last_paper_log_action($paper1), "Comment {$cid} submitted");
+        $j = call_api("=comment", $this->u_chair, ["c" => (string) $cid, "text" => "Log verb comment 2", "visibility" => "rev"], $paper1);
+        xassert($j->ok);
+        xassert_eqq($this->last_paper_log_action($paper1), "Comment {$cid} edited: text");
+
+        // new draft response, an edit, then submission
+        $j = call_api("=comment", $this->u_floyd, ["response" => "1", "text" => "Draft body", "draft" => 1], $paper1);
+        xassert($j->ok);
+        $rid = (int) $j->comment->cid;
+        xassert_eqq($this->last_paper_log_action($paper1), "Response {$rid} started draft");
+        $j = call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $rid, "text" => "Draft body 2", "draft" => 1], $paper1);
+        xassert($j->ok);
+        xassert_eqq($this->last_paper_log_action($paper1), "Response {$rid} edited draft: text");
+        $j = call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $rid, "text" => "Draft body 2"], $paper1);
+        xassert($j->ok);
+        xassert_str_starts_with($this->last_paper_log_action($paper1), "Response {$rid} submitted");
+
+        MailChecker::clear();
+        call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $rid, "delete" => 1], $paper1);
+        call_api("=comment", $this->u_chair, ["c" => (string) $cid, "delete" => 1], $paper1);
+        MailChecker::clear();
+        $sv = SettingValues::make_request($this->u_chair, [
+            "has_response" => "1", "response_active" => "0", "response/1/id" => "1"
+        ]);
+        xassert($sv->execute());
+    }
+
+    /** @return int */
+    private function draft_response_mail_count() {
+        $n = 0;
+        foreach (MailChecker::$preps as $prep) {
+            if (strpos($prep->subject, "Draft response for #1 ") !== false)
+                ++$n;
+        }
+        return $n;
+    }
+
+    function test_draft_response_notifies_contacts() {
+        $paper1 = $this->open_clean_response_round();
+        xassert_gt(count($paper1->contact_list()), 1);
+        $sv = SettingValues::make_request($this->u_chair, [
+            "has_response" => "1", "response/1/id" => "1",
+            "response/1/done" => "@" . (Conf::$now + 100000)
+        ]);
+        xassert($sv->execute());
+
+        // starting a draft response notifies the other contacts
+        $j = call_api("=comment", $this->u_floyd, ["response" => "1", "text" => "Draft body", "draft" => 1], $paper1);
+        xassert($j->ok);
+        $rid = (int) $j->comment->cid;
+        xassert_gt($this->draft_response_mail_count(), 0);
+        xassert_eqq($this->mail_count_to("floyd@ee.lbl.gov"), 0);
+
+        // edits within three hours do not
+        MailChecker::clear();
+        $j = call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $rid, "text" => "Draft body 2", "draft" => 1], $paper1);
+        xassert($j->ok);
+        xassert_eqq($this->draft_response_mail_count(), 0);
+
+        // later edits do
+        Conf::advance_current_time(Conf::$now + 20000);
+        $j = call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $rid, "text" => "Draft body 3", "draft" => 1], $paper1);
+        xassert($j->ok);
+        xassert_gt($this->draft_response_mail_count(), 0);
+
+        MailChecker::clear();
+        call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $rid, "delete" => 1], $paper1);
+        MailChecker::clear();
+        $this->close_response_round();
+    }
+
+    /** Open response round 1 on paper 1 and drop any response it already has.
+     * @return PaperInfo */
+    private function open_clean_response_round() {
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        $sv = SettingValues::make_request($this->u_chair, [
+            "review_open" => "1",
+            "has_response" => "1",
+            "response_active" => "1",
+            "response/1/id" => "1",
+            "response/1/name" => "",
+            "response/1/open" => "@" . (Conf::$now - 1),
+            "response/1/done" => "@" . (Conf::$now + 10000)
+        ]);
+        xassert($sv->execute());
+        foreach ($paper1->fetch_comments("(commentType&" . CommentInfo::CT_RESPONSE . ")!=0") as $c) {
+            call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $c->commentId, "delete" => 1], $paper1);
+        }
+        MailChecker::clear();
+        return $paper1;
+    }
+
+    private function close_response_round() {
+        $sv = SettingValues::make_request($this->u_chair, [
+            "has_response" => "1", "response_active" => "0", "response/1/id" => "1"
+        ]);
+        xassert($sv->execute());
+        MailChecker::clear();
+    }
+
+    /** @return int */
+    private function nresponses(PaperInfo $prow) {
+        return count($prow->fetch_comments("(commentType&" . CommentInfo::CT_RESPONSE . ")!=0"));
+    }
+
+    /** Submit the response that wins a concurrent insert race.
+     * @return int */
+    private function winning_response($text) {
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        $j = call_api("=comment", $this->u_floyd, ["response" => "1", "text" => $text], $paper1);
+        xassert($j->ok);
+        MailChecker::clear();
+        return (int) $j->comment->cid;
+    }
+
+    /** Post a response for `$text` that loses a concurrent insert race. The
+     * request resolves its target while paper 1 still has no response; a
+     * competing response for `$winner_text` is committed from
+     * `pre_save_function`, so this request's own insert is the one suppressed.
+     * `$attachment`, if given, is attached to the losing request only.
+     * @return object the losing request's JSON response */
+    private function losing_response_post($text, $winner_text, $attachment = null) {
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        xassert_eqq($this->nresponses($paper1), 0);
+        $args = ["response" => "1", "text" => $text];
+        if ($attachment !== null) {
+            $args["attachment:1"] = "new";
+        }
+        $qreq = TestQreq::post($args);
+        if ($attachment !== null) {
+            $qreq->set_file_content("attachment:1:file", $attachment, "text/plain");
+        }
+        $qreq->set_user($this->u_floyd);
+        $qreq->set_paper($paper1);
+        Qrequest::set_main_request($qreq);
+        $capi = new Comment_API($this->u_floyd, $qreq, $paper1);
+        $capi->set_pre_save_function(function () use ($qreq, $winner_text) {
+            $this->winning_response($winner_text);
+            // the winner ran as a nested request; restore this one
+            Qrequest::set_main_request($qreq);
+        });
+        try {
+            $jr = $capi->run_post($qreq, $paper1, DocumentLocator::M_ONE);
+        } catch (JsonCompletion $jc) {
+            $jr = $jc->result;
+        }
+        MailChecker::clear();
+        return (object) $jr->content;
+    }
+
+    /** Stage the response save that loses that race: paper 1 already has a
+     * response, and this status holds a skeleton whose target was resolved
+     * before the winner committed. Returned after its save has failed.
+     * @return array{CommentStatus,CommentInfo} */
+    private function losing_response_save($text) {
+        $rrd = $this->conf->response_round("1");
+        $skel = CommentInfo::make_response_template($rrd, $this->conf->checked_paper_by_id(1));
+        $cs = new CommentStatus($this->u_floyd);
+        xassert($cs->prepare_save($skel, ["text" => $text, "submit" => true]));
+        xassert_eqq($cs->execute_save(), false);
+        return [$cs, $skel];
+    }
+
+    // A response insert is guarded by `not exists`, so a second concurrent
+    // insert writes no row. `CommentInfo::save` must report that as a failure:
+    // `Comment_API::save_comment` reaches its response re-entry branch — which
+    // separates an identical re-entry (success) from a conflicting edit
+    // (`conflict`) — only when the save fails. Two requests cannot be
+    // interleaved in-process, so this drives the same objects the API drives,
+    // with the skeleton standing in for a target resolved before the winner
+    // committed.
+    function test_response_reentry_losing_save() {
+        $paper1 = $this->open_clean_response_round();
+        $cid = $this->winning_response("Winning response");
+
+        list($cs, $skel) = $this->losing_response_save("Losing response");
+        xassert_eqq($skel->commentId, 0);
+
+        // the winner is untouched and still the only response
+        xassert_eqq($this->nresponses($paper1), 1);
+        $cmt = $paper1->fetch_comments("commentId={$cid}")[0];
+        xassert_eqq($cmt->raw_content(), "Winning response");
+
+        call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $cid, "delete" => 1], $paper1);
+        $this->close_response_round();
+    }
+
+    // A failed save must leave nothing behind. `execute_save` marks the status
+    // saved only once the commit succeeds, so a failure still lets `abort_save`
+    // roll back the staged properties, and still leaves `notify_followers` with
+    // nothing to announce — otherwise a response that was never written mails
+    // the submission's authors.
+    function test_response_failed_save_leaves_nothing_behind() {
+        $paper1 = $this->open_clean_response_round();
+        $cid = $this->winning_response("Winning response");
+
+        list($cs, $skel) = $this->losing_response_save("Losing response");
+
+        // the loser's staged changes stay live until aborted, then are gone
+        xassert_eqq($skel->prop_changed(), true);
+        $cs->abort_save();
+        xassert_eqq($skel->prop_changed(), false);
+
+        // nothing is announced for a response that was never written
+        $cs->notify_followers();
+        xassert_eqq(count(MailChecker::$preps), 0);
+
+        call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $cid, "delete" => 1], $paper1);
+        $this->close_response_round();
+    }
+
+    // Losing the insert race with the *same* text is not an error: both
+    // requests wanted the same response, and the one that arrives second
+    // reports the committed response rather than a conflict.
+    function test_response_reentry_identical() {
+        $paper1 = $this->open_clean_response_round();
+
+        $j = $this->losing_response_post("Simultaneous response", "Simultaneous response");
+        xassert($j->ok);
+        xassert_eqq($j->valid, true);
+        xassert(!($j->conflict ?? false));
+        // this request established nothing; the concurrent one did
+        xassert_eqq($j->change_list, []);
+
+        // the reported comment is the one that actually committed
+        xassert_eqq($this->nresponses($paper1), 1);
+        $cmt = $paper1->fetch_comments("(commentType&" . CommentInfo::CT_RESPONSE . ")!=0")[0];
+        xassert_eqq((int) $j->cid, $cmt->commentId);
+        xassert_eqq($cmt->raw_content(), "Simultaneous response");
+
+        call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $cmt->commentId, "delete" => 1], $paper1);
+        $this->close_response_round();
+    }
+
+    // Losing the insert race with *different* text is a conflict: the loser's
+    // edit is refused and the committed response comes back so the client can
+    // reconcile.
+    function test_response_reentry_conflict() {
+        $paper1 = $this->open_clean_response_round();
+
+        $j = $this->losing_response_post("Loser text", "Winner text");
+        xassert(!$j->ok);
+        xassert_eqq($j->valid, false);
+        xassert_eqq($j->conflict, true);
+        // as for an `if_unmodified_since` conflict, report the attempted diff
+        xassert_eqq($j->change_list, ["new", "text", "visibility"]);
+
+        // the winner survives untouched and is returned to the loser
+        xassert_eqq($this->nresponses($paper1), 1);
+        $cmt = $paper1->fetch_comments("(commentType&" . CommentInfo::CT_RESPONSE . ")!=0")[0];
+        xassert_eqq($cmt->raw_content(), "Winner text");
+        xassert_eqq($j->comment->text, "Winner text");
+
+        call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $cmt->commentId, "delete" => 1], $paper1);
+        $this->close_response_round();
+    }
+
+    // The re-entry comparison must also see the losing request's own
+    // attachments. Attaching a file to otherwise identical text is a different
+    // response, so it is a conflict — not a success that drops the attachment.
+    function test_response_reentry_conflict_attachment() {
+        $paper1 = $this->open_clean_response_round();
+
+        $j = $this->losing_response_post("Same text", "Same text", "Loser attachment");
+        xassert(!$j->ok);
+        xassert_eqq($j->conflict, true);
+
+        // the winner survives, and the loser's attachment was not silently kept
+        xassert_eqq($this->nresponses($paper1), 1);
+        $cmt = $paper1->fetch_comments("(commentType&" . CommentInfo::CT_RESPONSE . ")!=0")[0];
+        xassert_eqq($cmt->raw_content(), "Same text");
+        xassert_eqq($cmt->attachment_ids(), []);
+
+        call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $cmt->commentId, "delete" => 1], $paper1);
+        $this->close_response_round();
+    }
+
+    // The re-entry comparison must read the response's full text. A response
+    // over 32000 characters keeps only a prefix in `comment`, so comparing that
+    // column would report a conflict for two requests that submitted exactly
+    // the same long text.
+    function test_response_reentry_identical_overflow() {
+        $paper1 = $this->open_clean_response_round();
+
+        $text = rtrim(str_repeat("Simultaneous overflowing response. ", 1000));
+        xassert(strlen($text) > 32000);
+        $j = $this->losing_response_post($text, $text);
+        xassert($j->ok);
+        xassert_eqq($j->valid, true);
+        xassert(!($j->conflict ?? false));
+
+        xassert_eqq($this->nresponses($paper1), 1);
+        $cmt = $paper1->fetch_comments("(commentType&" . CommentInfo::CT_RESPONSE . ")!=0")[0];
+        xassert_neqq($cmt->comment, $text);
+        xassert_eqq($cmt->raw_content(), $text);
+
+        call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $cmt->commentId, "delete" => 1], $paper1);
+        $this->close_response_round();
+    }
+
+    // A response over 32000 characters keeps only a prefix in `comment` and the
+    // whole text in `commentOverflow`. The re-entry comparison must therefore
+    // read `raw_content()`: comparing `comment` would make every long response
+    // look like a conflicting edit rather than an identical re-entry.
+    function test_response_overflow_raw_content() {
+        $paper1 = $this->open_clean_response_round();
+
+        $text = rtrim(str_repeat("Overflowing response. ", 2000));
+        xassert(strlen($text) > 32000);
+        $j = call_api("=comment", $this->u_floyd, ["response" => "1", "text" => $text], $paper1);
+        xassert($j->ok);
+        $cid = (int) $j->comment->cid;
+        MailChecker::clear();
+
+        $cmt = $paper1->fetch_comments("commentId={$cid}")[0];
+        xassert(!!$cmt);
+        xassert_neqq($cmt->comment, $text);
+        xassert_eqq($cmt->commentOverflow, $text);
+        xassert_eqq($cmt->raw_content(), $text);
+
+        // a deleted comment keeps no overflow text behind
+        $cmt->mark_deleted();
+        xassert_eqq($cmt->raw_content(), "");
+
+        call_api("=comment", $this->u_floyd, ["response" => "1", "c" => (string) $cid, "delete" => 1], $paper1);
+        $this->close_response_round();
     }
 
     function test_response_c_mismatch() {
@@ -1040,6 +1634,264 @@ class Comments_Tester {
         MailChecker::clear();
     }
 
+    /** @param list<object> $message_list
+     * @return ?object */
+    static private function find_warning($message_list) {
+        foreach ($message_list as $mi) {
+            if ($mi->status >= MessageSet::WARNING)
+                return $mi;
+        }
+        return null;
+    }
+
+    /** @param list<object> $message_list
+     * @param string $substr
+     * @return bool */
+    static private function has_message($message_list, $substr) {
+        foreach ($message_list as $mi) {
+            if (strpos($mi->message, $substr) !== false)
+                return true;
+        }
+        return false;
+    }
+
+    /** Count the mails queued so far addressed to `$email`.
+     * @param string $email
+     * @return int */
+    private function mail_count_to($email) {
+        $u = $this->conf->checked_user_by_email($email);
+        $n = 0;
+        foreach (MailChecker::$preps as $prep) {
+            if ($prep->has_recipient($u))
+                ++$n;
+        }
+        return $n;
+    }
+
+    /** @return int */
+    private function ncomments($pid) {
+        return $this->conf->fetch_ivalue("select count(*) from PaperComment where paperId=?", $pid);
+    }
+
+    // `dry_run=if_warning` saves only when the save produces no warnings.
+    // Mentioning a user who cannot view the comment warns, so such a comment is
+    // validated and reported, but not stored.
+    function test_comment_dry_run_if_warning() {
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        // `viewrev=1` fixes mention visibility: mgbaker, a paper-1 reviewer, can
+        // view a `rev` comment; mjh, a PC member conflicted with paper 1, cannot
+        xassert_eqq($this->conf->setting("viewrev"), null);
+        $this->conf->save_refresh_setting("viewrev", 1);
+        MailChecker::clear();
+        $before = $this->ncomments(1);
+
+        // a mention the mentionee cannot see: valid, warned, and not saved
+        $j = call_api("=comment", $this->u_chair,
+            ["c" => "new", "text" => "Hello @Mark Handley", "visibility" => "rev",
+             "dry_run" => "if_warning"], $paper1);
+        xassert($j->ok);
+        xassert_eqq($j->dry_run ?? false, true);
+        xassert_eqq($j->valid, true);
+        xassert_eqq($j->change_list, ["new", "text", "visibility"]);
+        xassert(!isset($j->comment));
+        $mi = self::find_warning($j->message_list ?? []);
+        xassert(!!$mi);
+        $mi && xassert_str_contains($mi->message, "cannot see");
+        xassert_eqq($this->ncomments(1), $before);
+
+        // the same request without `dry_run` saves: only the warning held it back
+        $j = call_api("=comment", $this->u_chair,
+            ["c" => "new", "text" => "Hello @Mark Handley", "visibility" => "rev"], $paper1);
+        xassert($j->ok);
+        xassert(!($j->dry_run ?? false));
+        xassert_eqq($j->valid, true);
+        xassert_eqq($this->ncomments(1), $before + 1);
+        $cid = (int) $j->comment->cid;
+
+        // a mention the mentionee can see does not warn, so `if_warning` commits
+        $j = call_api("=comment", $this->u_chair,
+            ["c" => "new", "text" => "Hello @Mary Baker", "visibility" => "rev",
+             "dry_run" => "if_warning"], $paper1);
+        xassert($j->ok);
+        xassert(!($j->dry_run ?? false));
+        xassert_eqq($j->valid, true);
+        xassert_eqq(self::find_warning($j->message_list ?? []), null);
+        xassert(isset($j->comment));
+        xassert_eqq($this->ncomments(1), $before + 2);
+        $cid2 = (int) $j->comment->cid;
+
+        // a comment with no mentions commits too
+        $j = call_api("=comment", $this->u_chair,
+            ["c" => "new", "text" => "No mentions here", "visibility" => "rev",
+             "dry_run" => "if_warning"], $paper1);
+        xassert($j->ok);
+        xassert(!($j->dry_run ?? false));
+        xassert(isset($j->comment));
+        $cid3 = (int) $j->comment->cid;
+
+        // editing an existing comment to add an unviewable mention is withheld,
+        // and the stored comment keeps its original text
+        $j = call_api("=comment", $this->u_chair,
+            ["c" => (string) $cid3, "text" => "No mentions here @Mark Handley",
+             "visibility" => "rev", "dry_run" => "if_warning"], $paper1);
+        xassert($j->ok);
+        xassert_eqq($j->dry_run ?? false, true);
+        xassert_eqq($j->valid, true);
+        xassert_eqq($j->change_list, ["text"]);
+        xassert(!isset($j->comment));
+        $cmt = $paper1->fetch_comments("commentId={$cid3}")[0];
+        xassert_eqq($cmt->unparse_json($this->u_chair)->text, "No mentions here");
+
+        // `notify=off` means no mention would have been notified anyway, so an
+        // unviewable mention is not a warning and the comment commits
+        $j = call_api("=comment", $this->u_chair,
+            ["c" => "new", "text" => "Silent @Mark Handley", "visibility" => "rev",
+             "notify" => "off", "dry_run" => "if_warning"], $paper1);
+        xassert($j->ok);
+        xassert(!($j->dry_run ?? false));
+        xassert_eqq(self::find_warning($j->message_list ?? []), null);
+        xassert(isset($j->comment));
+        $cid4 = (int) $j->comment->cid;
+
+        // a draft response notifies no one, so an unviewable mention in one is
+        // not a warning either
+        $j = call_api("=comment", $this->u_chair,
+            ["response" => "1", "text" => "Draft @Mark Handley", "draft" => 1,
+             "dry_run" => "if_warning"], $paper1);
+        xassert($j->ok);
+        xassert(!($j->dry_run ?? false));
+        xassert_eqq(self::find_warning($j->message_list ?? []), null);
+        xassert(isset($j->comment));
+        $cid5 = (int) $j->comment->cid;
+
+        // an error is not a withheld dry run: `valid` is false and `dry_run` unset
+        $j = call_api("=comment", $this->u_chair,
+            ["c" => "new", "text" => "", "dry_run" => "if_warning"], $paper1);
+        xassert(!$j->ok);
+        xassert_eqq($j->valid, false);
+        xassert(!($j->dry_run ?? false));
+
+        foreach ([$cid, $cid2, $cid3, $cid4, $cid5] as $c) {
+            $j = call_api("=comment", $this->u_chair, ["c" => (string) $c, "delete" => 1], $paper1);
+            xassert($j->ok);
+        }
+        xassert_eqq($this->ncomments(1), $before);
+
+        $this->conf->save_refresh_setting("viewrev", null);
+        MailChecker::clear();
+    }
+
+    // The mention warning must not become an oracle for facts the commenter
+    // cannot otherwise learn. A conflicted PC member cannot see any comment on
+    // the submission, so warning about them would tell any PC member whether an
+    // arbitrary other PC member is conflicted -- which `sub_pcconfvis` hides.
+    // Such a mention is therefore reported exactly like a mention that was
+    // really notified, and the save proceeds.
+    function test_comment_mention_conflict_not_an_oracle() {
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        $this->ensure_paper1_review($paper1);
+        xassert_eqq($this->conf->setting("viewrev"), null);
+        $pccv0 = $this->conf->setting("sub_pcconfvis");
+        // `viewrev=always` makes mention visibility depend on conflict alone
+        $this->conf->save_refresh_setting("viewrev", Conf::VIEWREV_ALWAYS);
+        MailChecker::clear();
+        $before = $this->ncomments(1);
+
+        $mjh = $this->conf->checked_user_by_email("mjh@isi.edu");
+        xassert($paper1->has_conflict($mjh));
+        $diot = $this->conf->checked_user_by_email("christophe.diot@sophia.inria.fr");
+        xassert(!$paper1->has_conflict($diot));
+
+        // hide PC conflicts, so mgbaker may not learn that mjh is conflicted
+        $this->conf->save_refresh_setting("sub_pcconfvis", 1);
+        $mgbaker = $this->conf->checked_user_by_email("mgbaker@cs.stanford.edu");
+        xassert(!$mgbaker->can_view_conflicts($paper1));
+        xassert(!$mjh->can_view_comment($paper1, new CommentInfo($paper1)));
+
+        // the unviewable mention and the viewable one are indistinguishable:
+        // both commit under `if_warning`, neither warns, both are reported
+        $cids = [];
+        foreach (["@Mark Handley", "@Christophe Diot"] as $mention) {
+            $j = call_api("=comment", $mgbaker,
+                ["c" => "new", "text" => "Hello {$mention}", "visibility" => "rev",
+                 "dry_run" => "if_warning"], $paper1);
+            xassert($j->ok);
+            xassert(!($j->dry_run ?? false));
+            xassert_eqq(self::find_warning($j->message_list ?? []), null);
+            xassert(isset($j->comment));
+            xassert(self::has_message($j->message_list ?? [], "Mentioned user"));
+            $cids[] = (int) $j->comment->cid;
+        }
+        xassert_eqq($this->ncomments(1), $before + 2);
+
+        // only the mention that could see the comment was actually notified
+        xassert_eqq($this->mail_count_to("mjh@isi.edu"), 0);
+        xassert_eqq($this->mail_count_to("christophe.diot@sophia.inria.fr"), 1);
+
+        // where the commenter may see conflicts, the warning is allowed, and
+        // `if_warning` withholds the save as usual
+        $this->conf->save_refresh_setting("sub_pcconfvis", 2);
+        $mgbaker = $this->conf->checked_user_by_email("mgbaker@cs.stanford.edu");
+        xassert($mgbaker->can_view_conflicts($paper1));
+        $j = call_api("=comment", $mgbaker,
+            ["c" => "new", "text" => "Hello @Mark Handley", "visibility" => "rev",
+             "dry_run" => "if_warning"], $paper1);
+        xassert($j->ok);
+        xassert_eqq($j->dry_run ?? false, true);
+        $mi = self::find_warning($j->message_list ?? []);
+        xassert(!!$mi);
+        $mi && xassert_str_contains($mi->message, "cannot see");
+        xassert(!isset($j->comment));
+        xassert_eqq($this->ncomments(1), $before + 2);
+
+        foreach ($cids as $c) {
+            $j = call_api("=comment", $mgbaker, ["c" => (string) $c, "delete" => 1], $paper1);
+            xassert($j->ok);
+        }
+        xassert_eqq($this->ncomments(1), $before);
+
+        $this->conf->save_refresh_setting("viewrev", null);
+        $this->conf->save_refresh_setting("sub_pcconfvis", $pccv0);
+        MailChecker::clear();
+    }
+
+    // A mention typed anonymously is echoed back anonymously, even when the
+    // commenter could resolve the identity themselves: the confirmation repeats
+    // the phrase the commenter used rather than resolving it for them.
+    function test_comment_mention_pseudonym_echo() {
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        $this->ensure_paper1_review($paper1);
+        xassert_eqq($this->conf->setting("viewrev"), null);
+        $this->conf->save_refresh_setting("viewrev", Conf::VIEWREV_ALWAYS);
+        MailChecker::clear();
+        $before = $this->ncomments(1);
+
+        $rrow = $paper1->review_by_user($this->u_mgbaker);
+        xassert(!!$rrow && $rrow->reviewOrdinal > 0);
+        $pseudonym = "Reviewer " . unparse_latin_ordinal($rrow->reviewOrdinal);
+        // the chair can see that {$pseudonym} is mgbaker, but asked anonymously
+        xassert($this->u_chair->can_view_review_identity($paper1, $rrow));
+
+        $j = call_api("=comment", $this->u_chair,
+            ["c" => "new", "text" => "Hello @{$pseudonym}", "visibility" => "rev"], $paper1);
+        xassert($j->ok);
+        xassert(isset($j->comment));
+        $cid = (int) $j->comment->cid;
+        xassert(self::has_message($j->message_list ?? [], $pseudonym));
+        xassert(!self::has_message($j->message_list ?? [], "Baker"));
+
+        // mgbaker is both the mentionee and a paper-1 reviewer, but is notified
+        // just once
+        xassert_eqq($this->mail_count_to("mgbaker@cs.stanford.edu"), 1);
+
+        $j = call_api("=comment", $this->u_chair, ["c" => (string) $cid, "delete" => 1], $paper1);
+        xassert($j->ok);
+        xassert_eqq($this->ncomments(1), $before);
+
+        $this->conf->save_refresh_setting("viewrev", null);
+        MailChecker::clear();
+    }
+
     // `if_unmodified_since` guards an edit against a concurrent change. A stale
     // (or `0`) precondition rejects the edit as a `conflict`, keyed to the
     // `if_unmodified_since` field, and returns the server's current version.
@@ -1165,6 +2017,38 @@ class Comments_Tester {
 
         // delete via JSON
         $qreq = TestQreq::post_json(["cid" => $cid, "delete" => true]);
+        $j = call_api("=comment", $this->u_chair, $qreq, $paper3);
+        xassert($j->ok);
+        xassert_eqq($j->change_list, ["delete"]);
+        xassert(!$paper3->fetch_comments("commentId={$cid}"));
+
+        MailChecker::clear();
+    }
+
+    function test_comment_json_absent_text() {
+        $paper3 = $this->conf->checked_paper_by_id(3);
+
+        // a new comment needs text
+        $qreq = TestQreq::post_json(["visibility" => "rev", "topic" => "paper"]);
+        $jr = call_api_result("=comment", $this->u_chair, $qreq, $paper3);
+        xassert_eqq($jr->content["ok"], false);
+        xassert_eqq($jr->message_item(0)->field, "text");
+
+        // an edit without text keeps the existing text
+        $qreq = TestQreq::post_json(["text" => "Keep this text", "visibility" => "rev", "topic" => "paper"]);
+        $j = call_api("=comment", $this->u_chair, $qreq, $paper3);
+        xassert($j->ok);
+        $cid = (int) $j->comment->cid;
+        $qreq = TestQreq::post_json(["cid" => $cid, "visibility" => "pc"]);
+        $j = call_api("=comment", $this->u_chair, $qreq, $paper3);
+        xassert($j->ok);
+        xassert_eqq($j->comment->text, "Keep this text");
+        xassert_eqq($j->comment->visibility, "pc");
+        xassert_eqq($j->change_list, ["visibility"]);
+        xassert(!!$paper3->fetch_comments("commentId={$cid}"));
+
+        // explicitly empty text still deletes
+        $qreq = TestQreq::post_json(["cid" => $cid, "text" => ""]);
         $j = call_api("=comment", $this->u_chair, $qreq, $paper3);
         xassert($j->ok);
         xassert_eqq($j->change_list, ["delete"]);
@@ -1305,6 +2189,280 @@ class Comments_Tester {
         xassert_eqq(count($bset), 1);
         xassert_eqq($bset->document_by_index(0)->content(), "BEE");
 
+        MailChecker::clear();
+    }
+
+    // A comment may list only so many attachments (like an attachments
+    // field), and one request upload only so many new ones among all the
+    // comments it saves; within those bounds each costs bounded work.
+    function test_comment_many_attachments() {
+        $orig_rev_open = $this->conf->setting("rev_open");
+        $this->conf->save_refresh_setting("rev_open", 1);
+        $psid0 = (int) $this->conf->fetch_ivalue("select coalesce(max(paperStorageId),0) from PaperStorage");
+        $cids = []; // comments to delete
+        try {
+            $this->_test_comment_many_attachments($cids);
+        } finally {
+            $paper6 = $this->u_chair->checked_paper_by_id(6);
+            foreach ($cids as $cid) {
+                $j = call_api("=comment", $this->u_chair, ["c" => (string) $cid, "delete" => 1], $paper6);
+                xassert($j->ok);
+            }
+            // (nor leave their documents behind)
+            $this->conf->qe("delete from PaperStorage where paperId=6 and documentType=? and paperStorageId>?", DTYPE_COMMENT, $psid0);
+            $this->conf->save_refresh_setting("rev_open", $orig_rev_open);
+            MailChecker::clear();
+        }
+    }
+
+    /** @param list<int> &$cids */
+    private function _test_comment_many_attachments(&$cids) {
+        $paper6 = $this->u_mgbaker->checked_paper_by_id(6);
+        $storage_count = function () {
+            return (int) $this->conf->fetch_ivalue("select count(*) from PaperStorage where paperId=6");
+        };
+        $nps = $storage_count();
+        $max = Attachments_PaperOption::MAX_PARSE_COUNT;
+        $msg = "Too many attachments (at most {$max})";
+        $reqmsg = "Too many attachments (at most {$max} new per request)";
+        $make_docs = function ($pfx, $n) {
+            $docs = [];
+            for ($i = 0; $i !== $n; ++$i) {
+                $docs[] = ["filename" => "{$pfx}{$i}.txt", "content" => "{$pfx}-{$i}"];
+            }
+            return $docs;
+        };
+
+        // one comment listing MAX+1, as JSON and as form: rejected, nothing
+        // stored...
+        $qreq = TestQreq::post_json(["text" => "too many", "visibility" => "rev", "docs" => $make_docs("d", $max + 1)]);
+        $j = call_api("=comment", $this->u_mgbaker, $qreq, $paper6);
+        xassert(!$j->ok);
+        xassert_eqq($j->status_code, 400);
+        xassert_str_contains(json_encode_db($j->message_list), $msg);
+        $qreq = TestQreq::post(["text" => "too many", "visibility" => "rev"]);
+        for ($i = 1; $i <= $max + 1; ++$i) {
+            $qreq["attachment:{$i}"] = "new";
+            $qreq->set_file_content("attachment:{$i}:file", "f-{$i}", "f{$i}.txt", "text/plain");
+        }
+        $j = call_api("=comment", $this->u_mgbaker, $qreq, $paper6);
+        xassert(!$j->ok);
+        xassert_eqq($j->status_code, 400);
+        xassert_str_contains(json_encode_db($j->message_list), $msg);
+        xassert_eqq($storage_count(), $nps);
+        xassert(!$paper6->fetch_comments("comment='too many'"));
+
+        // ...except from a site administrator as JSON (say for an import)
+        xassert(!$this->u_mgbaker->privChair);
+        xassert($this->u_chair->privChair);
+        $qreq = TestQreq::post_json(["text" => "so many", "visibility" => "rev", "docs" => $make_docs("d", $max + 1)]);
+        $j = call_api("=comment", $this->u_chair, $qreq, $this->u_chair->checked_paper_by_id(6));
+        xassert($j->ok);
+        xassert_eqq(count($j->comment->docs), $max + 1);
+        $cids[] = $j->comment->cid;
+        $nps += $max + 1;
+        xassert_eqq($storage_count(), $nps);
+
+        // two comments with $n attachments each, 2*$n > MAX, saved by two
+        // requests can be fetched and posted back together: naming one’s
+        // own attachments by `docid`, as that does, uploads nothing
+        $n = intdiv($max * 3, 5);
+        xassert($max < 2 * $n && $n + 1 <= $max);
+        foreach ([1, 2] as $i) {
+            $j = call_api("=comment", $this->u_mgbaker, TestQreq::post_json(["text" => "enn {$i}", "visibility" => "rev", "docs" => $make_docs("e{$i}x", $n)]), $paper6);
+            xassert($j->ok);
+            xassert_eqq(count($j->comment->docs), $n);
+            $cids[] = $j->comment->cid;
+        }
+        $nps += 2 * $n;
+        xassert_eqq($storage_count(), $nps);
+        $j = call_api("comments", $this->u_mgbaker, ["p" => "6"], $this->u_mgbaker->checked_paper_by_id(6));
+        xassert($j->ok);
+        $cjs = [];
+        foreach ($j->comments as $cj) {
+            if (str_starts_with($cj->text ?? "", "enn ")) {
+                xassert_eqq(count($cj->docs), $n);
+                xassert(is_int($cj->docs[0]->docid));
+                $cj->text .= "*";
+                $cjs[] = $cj;
+            }
+        }
+        xassert_eqq(count($cjs), 2);
+        $j = call_api("=comments", $this->u_mgbaker, TestQreq::post_json($cjs));
+        xassert($j->ok);
+        xassert_eqq($j->status_list[0]->valid, true);
+        xassert_eqq($j->status_list[1]->valid, true);
+        xassert_eqq($j->comments[0]->text, "enn 1*");
+        xassert_eqq(count($j->comments[0]->docs), $n);
+        xassert_eqq($j->comments[1]->text, "enn 2*");
+        xassert_eqq(count($j->comments[1]->docs), $n);
+        xassert_eqq($storage_count(), $nps);
+
+        // but one non-administrator request may upload at most MAX new
+        // attachments among the comments it saves: here the second item
+        // would pass that, so it fails (using up none of the allowance),
+        // while the third, which keeps its $n by `docid` and adds one,
+        // still fits
+        $docs1 = [];
+        foreach ($cjs[0]->docs as $dj) {
+            $docs1[] = ["docid" => $dj->docid];
+        }
+        $docs1[] = ["filename" => "straw.txt", "content" => "straw"];
+        $qreq = TestQreq::post_json([
+            ["pid" => 6, "text" => "enn 3", "visibility" => "rev", "docs" => $make_docs("e3x", $n)],
+            ["pid" => 6, "text" => "enn 4", "visibility" => "rev", "docs" => $make_docs("e4x", $n)],
+            ["pid" => 6, "cid" => $cjs[0]->cid, "text" => "enn 1**", "docs" => $docs1]
+        ]);
+        $j = call_api("=comments", $this->u_mgbaker, $qreq);
+        xassert($j->ok);
+        xassert_eqq(count($j->status_list), 3);
+        xassert_eqq($j->status_list[0]->valid, true);
+        xassert_eqq($j->status_list[1]->valid, false);
+        xassert_eqq($j->status_list[2]->valid, true);
+        xassert_eqq(count($j->comments[0]->docs), $n);
+        $cids[] = $j->comments[0]->cid;
+        xassert_eqq($j->comments[1], null);
+        xassert_eqq($j->comments[2]->text, "enn 1**");
+        xassert_eqq(count($j->comments[2]->docs), $n + 1);
+        xassert_eqq($j->comments[2]->docs[0]->docid, $cjs[0]->docs[0]->docid);
+        $nerrors = 0;
+        foreach ($j->message_list as $mi) {
+            if ($mi->status >= 2) {
+                ++$nerrors;
+                xassert_eqq($mi->landmark, 1);
+                xassert_eqq($mi->field, "docs");
+                xassert_str_contains($mi->message, $reqmsg);
+            }
+        }
+        xassert_eqq($nerrors, 1);
+        $nps += $n + 1;
+        xassert_eqq($storage_count(), $nps);
+        $paper6->load_comments();
+        xassert(!$paper6->fetch_comments("comment='enn 4'"));
+
+        // - a comment that fails part way has used up only the uploads it
+        //   attempted: here just the first, which has no content
+        $docs5 = $make_docs("e5x", $n);
+        array_unshift($docs5, ["filename" => "empty.txt"]);
+        $qreq = TestQreq::post_json([
+            ["pid" => 6, "text" => "enn 5", "visibility" => "rev", "docs" => $docs5],
+            ["pid" => 6, "text" => "enn 6", "visibility" => "rev", "docs" => $make_docs("e6x", $n)]
+        ]);
+        $j = call_api("=comments", $this->u_mgbaker, $qreq);
+        xassert($j->ok);
+        xassert_eqq($j->status_list[0]->valid, false);
+        xassert_eqq($j->status_list[1]->valid, true);
+        xassert_str_contains(json_encode_db($j->message_list), "without any content");
+        xassert_eqq(count($j->comments[1]->docs), $n);
+        $cids[] = $j->comments[1]->cid;
+        $nps += $n;
+        xassert_eqq($storage_count(), $nps);
+
+        // (a site administrator’s request may upload any number)
+        $qreq = TestQreq::post_json([
+            ["pid" => 6, "text" => "chair 1", "visibility" => "rev", "docs" => $make_docs("c1x", $n)],
+            ["pid" => 6, "text" => "chair 2", "visibility" => "rev", "docs" => $make_docs("c2x", $n)]
+        ]);
+        $j = call_api("=comments", $this->u_chair, $qreq);
+        xassert($j->ok);
+        xassert_eqq($j->status_list[0]->valid, true);
+        xassert_eqq($j->status_list[1]->valid, true);
+        xassert_eqq(count($j->comments[0]->docs), $n);
+        xassert_eqq(count($j->comments[1]->docs), $n);
+        $cids[] = $j->comments[0]->cid;
+        $cids[] = $j->comments[1]->cid;
+        $nps += 2 * $n;
+        xassert_eqq($storage_count(), $nps);
+
+        // within the bounds, each listed attachment should cost a bounded
+        // amount of work however many comment documents the submission has
+        // stored (a few hundred on paper 6 by now, and each batch here adds
+        // $n more): they are read to look for stored copies once per batch, not
+        // once or twice per attachment (`db_rows_read` counts rows the
+        // database reads, not time)
+        $half = intdiv($n, 2);
+        $rounds = 3;
+        $nreads = [];
+        for ($r = 0; $r < $rounds; ++$r) {
+            $items = [];
+            foreach ([0, 1] as $i) {
+                $items[] = ["pid" => 6, "text" => "batch {$r}.{$i}", "visibility" => "rev", "docs" => $make_docs("r{$r}{$i}x", $half)];
+            }
+            $nr = db_rows_read($this->conf);
+            $j = call_api("=comments", $this->u_mgbaker, TestQreq::post_json($items));
+            $nreads[] = db_rows_read($this->conf) - $nr;
+            xassert($j->ok);
+            xassert_eqq(count($j->comments), 2);
+            foreach ($j->comments as $i => $cj) {
+                xassert_eqq($j->status_list[$i]->valid, true);
+                xassert_eqq(count($cj->docs), $half);
+                $cids[] = $cj->cid;
+            }
+        }
+        $nps += $rounds * 2 * $half;
+        xassert_eqq($storage_count(), $nps);
+        // - the last batch started with `$grown` more stored rows, and
+        //   document links, than the first; a batch passes over them a
+        //   fixed few times (to index them, to reload the submission’s
+        //   document list...), so allow it several more passes’ worth of
+        //   reads -- where it used to pass over the stored rows once or
+        //   twice per listed attachment
+        $grown = ($rounds - 1) * 2 * $half;
+        $passes = 10;
+        xassert_lt($passes, $half);
+        xassert_lt($nreads[$rounds - 1] - $nreads[0], $grown * $passes);
+    }
+
+    // Attachments with duplicate names get stable uniquified member names
+    // end to end (the naming rule and its cost are pinned by
+    // DocumentBasics::test_docset_unique_filenames).
+    function test_comment_duplicate_attachment_names() {
+        $orig_rev_open = $this->conf->setting("rev_open");
+        $this->conf->save_refresh_setting("rev_open", 1);
+        $paper6 = $this->u_mgbaker->checked_paper_by_id(6);
+
+        $qreq = TestQreq::post_json(["text" => "figs", "visibility" => "rev",
+            "docs" => [["filename" => "fig.txt", "content" => "F0"],
+                       ["filename" => "fig (2).txt", "content" => "F1"],
+                       ["filename" => "fig (2).txt", "content" => "F2"],
+                       ["filename" => "fig.txt", "content" => "F3"]]]);
+        $j = call_api("=comment", $this->u_mgbaker, $qreq, $paper6);
+        xassert($j->ok);
+        $cid = (int) $j->comment->cid;
+        $ufns = [];
+        foreach ($j->comment->docs as $dj) {
+            $ufns[] = $dj->unique_filename ?? $dj->filename;
+        }
+        xassert_eqq($ufns, ["fig.txt", "fig (2).txt", "fig (3).txt", "fig (1).txt"]);
+        $paper6 = $this->u_mgbaker->checked_paper_by_id(6);
+        $dl = call_api_result("document", $this->u_mgbaker, ["p" => "6", "dt" => "comment-cx{$cid}", "attachment" => "fig (1).txt"], $paper6);
+        xassert_eqq($dl->response_code(), 200);
+        xassert_eqq($dl->header("ETag"), "\"" . $j->comment->docs[3]->hash . "\"");
+        $dl = call_api_result("document", $this->u_mgbaker, ["p" => "6", "dt" => "comment-cx{$cid}", "attachment" => "fig (4).txt"], $paper6);
+        xassert_eqq($dl->response_code(), 404);
+
+        $docs = array_fill(0, 50, ["filename" => "same.txt", "content" => "SAME"]);
+        $qreq = TestQreq::post_json(["text" => "many", "visibility" => "rev", "docs" => $docs], ["c" => (string) $cid]);
+        $j = call_api("=comment", $this->u_mgbaker, $qreq, $paper6);
+        xassert($j->ok);
+        $paper6 = $this->u_mgbaker->checked_paper_by_id(6);
+        $j = call_api("comments", $this->u_mgbaker, ["p" => "6"], $paper6);
+        xassert($j->ok);
+        $cj = null;
+        foreach ($j->comments as $x) {
+            if ((int) $x->cid === $cid) {
+                $cj = $x;
+            }
+        }
+        xassert($cj !== null);
+        $docs = $cj ? $cj->docs : [];
+        xassert_eqq(count($docs), 50);
+        xassert_eqq($docs[0]->unique_filename ?? $docs[0]->filename ?? null, "same.txt");
+        xassert_eqq($docs[49]->unique_filename ?? null, "same (49).txt");
+
+        $j = call_api("=comment", $this->u_mgbaker, ["c" => (string) $cid, "delete" => 1], $paper6);
+        xassert($j->ok);
+        $this->conf->save_refresh_setting("rev_open", $orig_rev_open);
         MailChecker::clear();
     }
 
@@ -1625,6 +2783,398 @@ class Comments_Tester {
         MailChecker::clear();
     }
 
+    // Attaching a file, dropping one, and deleting a comment that holds one
+    // are all document writes, and a token scoped to comments alone does none
+    // of them. Editing a comment's text carries its attachments through, which
+    // is not a write.
+    function test_comment_attachments_need_document_scope() {
+        $fresh = function () {
+            return $this->conf->checked_paper_by_id(1);
+        };
+        $post = function ($args, $file = null) use ($fresh) {
+            $qreq = new Qrequest("POST", $args);
+            $qreq->approve_token();
+            if ($file) {
+                $qreq->set_file_content("attachment:1:file", $file, "note.txt", "text/plain");
+            }
+            return call_api("=comment", $this->u_chair, $qreq, $fresh());
+        };
+
+        $j = $post(["c" => "new", "text" => "Holds a file", "attachment:1" => "new"], "Body");
+        xassert($j->ok);
+        $cid = (int) $j->comment->cid;
+        $docid = $fresh()->fetch_comments("commentId={$cid}")[0]
+            ->attachments()->as_list()[0]->paperStorageId;
+
+        $this->u_chair->set_scope("comment:write");
+
+        // uploading needs document scope
+        $j = $post(["c" => "new", "text" => "Another file", "attachment:1" => "new"], "More");
+        xassert(!$j->ok);
+        xassert_str_contains($j->message_list[0]->message ?? "", "document:write");
+
+        // so does dropping one (a POST that says nothing about attachments
+        // carries them, so the drop has to be explicit, as the form makes it)
+        $j = $post(["c" => $cid, "text" => "Holds a file",
+                    "attachment:1" => "{$docid}", "attachment:1:delete" => 1]);
+        xassert(!$j->ok);
+        xassert_str_contains($j->message_list[0]->message ?? "", "document:write");
+
+        // and so does deleting the comment that holds it
+        $j = $post(["c" => $cid, "delete" => 1]);
+        xassert(!$j->ok);
+        xassert_str_contains($j->message_list[0]->message ?? "", "document:write");
+
+        // editing the text does not: the attachments come through unchanged
+        $j = $post(["c" => $cid, "text" => "Still holds it",
+                    "attachment:1" => "{$docid}"]);
+        xassert($j->ok, $j->message_list[0]->message ?? "");
+        $this->u_chair->set_scope();
+
+        $crow = $fresh()->fetch_comments("commentId={$cid}")[0];
+        xassert_eqq($crow->raw_content(), "Still holds it");
+        xassert_eqq(count($crow->attachments()), 1);
+
+        $this->conf->qe("delete from PaperComment where paperId=1");
+        MailChecker::clear();
+    }
+
+    // An author's attachment is how the paper itself reaches reviewers, so a
+    // response or author comment answers to the submission PDF's permission as
+    // well as to document scope. A reviewer's attachment does not: that file is
+    // the reviewer's, and no policy about distributing the submission covers it.
+    function test_response_attachments_follow_submission_pdf_permission() {
+        $conf = $this->conf;
+        $conf->qe("delete from PaperComment where paperId=1");
+
+        // this test states its own preconditions rather than inheriting them
+        // from class order: reviewing open, mgbaker's review submitted, and
+        // comments visible to the PC at all
+        $old_revopen = $conf->setting("rev_open");
+        $old_viewrev = $conf->setting("viewrev");
+        $conf->save_refresh_setting("rev_open", 1);
+        $conf->save_refresh_setting("viewrev", Conf::VIEWREV_ALWAYS);
+        $this->ensure_paper1_review($conf->checked_paper_by_id(1));
+        $attach = function ($user, $args, $name) {
+            $conf = $this->conf;
+            $qreq = new Qrequest("POST", $args + ["attachment:1" => "new"]);
+            $qreq->approve_token();
+            $qreq->set_file_content("attachment:1:file", "Body", $name, "text/plain");
+            $j = call_api("=comment", $user, $qreq, $conf->checked_paper_by_id(1));
+            xassert($j->ok, $j->message_list[0]->message ?? "");
+            return (int) $j->comment->cid;
+        };
+        // what the rule keys on is the comment's class, not who typed it
+        $rrd = $conf->response_round_list()[0];
+        $rcid = $attach($this->u_chair,
+            ["response" => $rrd->name, "text" => "Our revision"], "resp.txt");
+        $ccid = $attach($this->u_chair,
+            ["c" => "new", "text" => "Reviewer notes", "visibility" => "au"], "rev.txt");
+
+        $fetch = function ($user, $cid, $name) {
+            $dr = new DocumentRequest(["p" => 1, "dt" => "comment-cx{$cid}",
+                                       "attachment" => $name], $user);
+            return $dr->document();
+        };
+
+        // an assigned reviewer may open the submission, so both come through,
+        // and a track that withholds submission PDFs does not reach them: the
+        // reviewer branch of `can_view_paper` answers before any track does
+        $conf->save_refresh_setting("tracks", 1, ["_" => ["viewpdf" => "+none"]]);
+        $prow = $conf->checked_paper_by_id(1);
+        xassert($this->u_mgbaker->can_view_paper($prow, true));
+        xassert_neqq($fetch($this->u_mgbaker, $rcid, "resp.txt"), null);
+        xassert_neqq($fetch($this->u_mgbaker, $ccid, "rev.txt"), null);
+
+        // the population the rule binds is the PC member who may read the
+        // discussion but not open the paper. Only a conference whose comments
+        // are wider than its PDF permission has one.
+        $prow = $conf->checked_paper_by_id(1);
+        $u = null;
+        foreach ($conf->pc_members() as $xu) {
+            if ($xu->can_view_comment($prow, $prow->fetch_comments("commentId={$rcid}")[0])
+                && !$xu->can_view_paper($prow, true)) {
+                $u = $xu;
+                break;
+            }
+        }
+        xassert_neqq($u, null);
+        if ($u) {
+            // the author's attachment goes with the paper; the other stays
+            xassert_eqq($fetch($u, $rcid, "resp.txt"), null);
+            xassert_neqq($fetch($u, $ccid, "rev.txt"), null);
+            // and it is not merely unfetchable: the comment does not say it is
+            // there, so nothing offers a link that would refuse
+            $rcj = $prow->fetch_comments("commentId={$rcid}")[0]->unparse_json($u);
+            $ccj = $prow->fetch_comments("commentId={$ccid}")[0]->unparse_json($u);
+            xassert_eqq($rcj->docs ?? null, null);
+            xassert_eqq(count($ccj->docs ?? []), 1);
+        }
+        $conf->save_refresh_setting("tracks", null);
+        $prow = $conf->checked_paper_by_id(1);
+        if ($u) {
+            // and with the track gone it comes through
+            xassert($u->can_view_paper($prow, true));
+            xassert_neqq($fetch($u, $rcid, "resp.txt"), null);
+        }
+        $conf->save_refresh_setting("viewrev", $old_viewrev);
+        $conf->save_refresh_setting("rev_open", $old_revopen);
+
+        // document scope covers both, whoever wrote them
+        $this->u_mgbaker->set_scope("comment:read");
+        xassert_eqq($fetch($this->u_mgbaker, $rcid, "resp.txt"), null);
+        xassert_eqq($fetch($this->u_mgbaker, $ccid, "rev.txt"), null);
+        $this->u_mgbaker->set_scope();
+        xassert_neqq($fetch($this->u_mgbaker, $ccid, "rev.txt"), null);
+
+        $conf->qe("delete from PaperComment where paperId=1");
+        MailChecker::clear();
+    }
+
+    // `unparse_text` is the mail rendering. A response longer than its round's
+    // word limit is cut there with a marker saying whether the rest is on the
+    // website; past the hard limit there is no rest, and the text is cut even
+    // when the caller did not ask for truncation.
+    function test_response_unparse_text_word_limits() {
+        $conf = $this->conf;
+        $conf->qe("delete from PaperComment where paperId=1");
+        $rrd = $conf->response_round_list()[0];
+        $old_wl = $rrd->wordlimit;
+        $old_hwl = $rrd->hard_wordlimit;
+
+        $words = [];
+        for ($i = 1; $i <= 30; ++$i) {
+            $words[] = "w{$i}";
+        }
+        $prow = $conf->checked_paper_by_id(1);
+        $tmpl = CommentInfo::make_response_template($rrd, $prow);
+        $cs = new CommentStatus($this->u_chair);
+        xassert($cs->prepare_save($tmpl, ["text" => join(" ", $words), "submit" => true]),
+                $cs->full_feedback_text());
+        xassert($cs->execute_save(), $cs->full_feedback_text());
+        $crow = ($conf->checked_paper_by_id(1)->all_comments())[0];
+
+        $render = function ($wl, $hwl, $truncate) use ($crow, $rrd) {
+            $rrd->wordlimit = $wl;
+            $rrd->hard_wordlimit = $hwl;
+            return $crow->unparse_text($this->u_chair,
+                $truncate ? ReviewForm::UNPARSE_TRUNCATE : 0);
+        };
+
+        // the header counts the words the author wrote, not the words sent
+        $t = $render(10, 0, true);
+        xassert_str_contains($t, "(30 words)");
+        xassert_str_contains($t, "w10");
+        xassert(!str_contains($t, "w11"));
+        xassert_str_contains($t, "more available on website");
+
+        // when the limits coincide there is nothing on the website either
+        $t = $render(10, 10, true);
+        xassert_str_contains($t, "w10");
+        xassert(!str_contains($t, "w11"));
+        xassert_str_contains($t, "Truncated for length");
+        xassert(!str_contains($t, "more available on website"));
+
+        // without a truncation request the soft limit does not apply...
+        $t = $render(10, 0, false);
+        xassert_str_contains($t, "w30");
+        xassert(!str_contains($t, "Truncated for length"));
+
+        // ...but the hard limit still does, since nobody is shown past it
+        $t = $render(10, 20, false);
+        xassert_str_contains($t, "w20");
+        xassert(!str_contains($t, "w21"));
+        xassert_str_contains($t, "Truncated for length");
+        xassert(!str_contains($t, "more available on website"));
+
+        // a response under its limit is rendered whole and unmarked
+        $t = $render(50, 0, true);
+        xassert_str_contains($t, "w30");
+        xassert(!str_contains($t, "Truncated for length"));
+        xassert(!str_contains($t, "more available on website"));
+
+        $rrd->wordlimit = $old_wl;
+        $rrd->hard_wordlimit = $old_hwl;
+        $conf->qe("delete from PaperComment where paperId=1");
+        MailChecker::clear();
+    }
+
+    function test_comment_echo_respects_truncation() {
+        // a comment object returned cut at a word limit, then saved back
+        $conf = $this->conf;
+        $conf->qe("delete from PaperComment where paperId=1");
+        $rrd = $conf->response_round_list()[0];
+        $old_wl = $rrd->wordlimit;
+        $old_hwl = $rrd->hard_wordlimit;
+        $rrd->wordlimit = 10;
+        $rrd->hard_wordlimit = 20;
+
+        $words = [];
+        for ($i = 1; $i <= 30; ++$i) {
+            $words[] = "w{$i}";
+        }
+        $prow = $conf->checked_paper_by_id(1);
+        $cs = new CommentStatus($this->u_chair);
+        xassert($cs->prepare_save(CommentInfo::make_response_template($rrd, $prow),
+                                  ["text" => join(" ", $words), "submit" => true]),
+                $cs->full_feedback_text());
+        xassert($cs->execute_save(), $cs->full_feedback_text());
+        $prow = $conf->checked_paper_by_id(1);
+        $cid = $prow->all_comments()[0]->commentId;
+        $msgs = function ($jr) {
+            return array_map(function ($mi) { return [$mi->field ?? null, $mi->status]; }, $jr->message_list ?? []);
+        };
+
+        // text cut at the soft limit is refused
+        $cj = call_api("comment", $this->u_chair, ["c" => $cid], $prow)->comment;
+        xassert_eqq($cj->truncated ?? null, ["text" => "soft"]);
+        $jr = call_api("=comment", $this->u_chair, TestQreq::post_json($cj, ["c" => $cid, "dry_run" => 1]), $prow);
+        xassert_eqq($jr->valid, false);
+        xassert_in_eqq(["text", 2], $msgs($jr));
+
+        // text cut at the hard limit is saved with a warning
+        $cj = call_api("comment", $this->u_chair, ["c" => $cid, "word_limit" => "hard"], $prow)->comment;
+        xassert_eqq($cj->truncated ?? null, ["text" => "hard"]);
+        $jr = call_api("=comment", $this->u_chair, TestQreq::post_json($cj, ["c" => $cid, "dry_run" => 1]), $prow);
+        xassert_eqq($jr->valid, true);
+        xassert_in_eqq(["text", 1], $msgs($jr));
+        xassert_not_in_eqq(["truncated", 1], $msgs($jr));
+
+        $rrd->wordlimit = $old_wl;
+        $rrd->hard_wordlimit = $old_hwl;
+        $conf->qe("delete from PaperComment where paperId=1");
+        MailChecker::clear();
+    }
+
+    /** @return object */
+    private function restored_edit_comment(PaperInfo $prow, $cid) {
+        $qreq = TestQreq::get(["p" => $prow->paperId, "c" => $cid, "editcomment" => 1])
+            ->set_user($this->u_chair);
+        $pp = new Paper_Page($this->u_chair, $qreq);
+        $pp->prow = $prow;
+        Ht::unstash();
+        (new ReflectionMethod($pp, "_stash_edit_comment"))->invoke($pp);
+        xassert(preg_match('/hotcrp\.edit_comment\((.*)\)/s', Ht::unstash(), $m));
+        return json_decode($m[1]);
+    }
+
+    function test_edit_comment_restore_ignores_soft_word_limit() {
+        // restoring a response into the editor keeps text over the soft
+        // limit, as the page's own comment display does
+        $conf = $this->conf;
+        $conf->qe("delete from PaperComment where paperId=1");
+        $rrd = $conf->response_round_list()[0];
+        $old_wl = $rrd->wordlimit;
+        $old_hwl = $rrd->hard_wordlimit;
+        $rrd->wordlimit = 10;
+        $rrd->hard_wordlimit = 20;
+
+        $words = [];
+        for ($i = 1; $i <= 30; ++$i) {
+            $words[] = "w{$i}";
+        }
+        foreach ([15 => 15, 30 => 20] as $n => $want) {
+            $conf->qe("delete from PaperComment where paperId=1");
+            $prow = $conf->checked_paper_by_id(1);
+            $cs = new CommentStatus($this->u_chair);
+            xassert($cs->prepare_save(CommentInfo::make_response_template($rrd, $prow),
+                                      ["text" => join(" ", array_slice($words, 0, $n)), "submit" => true]),
+                    $cs->full_feedback_text());
+            xassert($cs->execute_save(), $cs->full_feedback_text());
+            $prow = $conf->checked_paper_by_id(1);
+            $cj = $this->restored_edit_comment($prow, $prow->all_comments()[0]->commentId);
+            xassert_eqq(count_words($cj->text), $want);
+        }
+
+        $rrd->wordlimit = $old_wl;
+        $rrd->hard_wordlimit = $old_hwl;
+        $conf->qe("delete from PaperComment where paperId=1");
+        MailChecker::clear();
+    }
+
+    // Comments keep no version history, so the type bits are the whole record
+    // of who wrote what: `CT_BOT` describes the version you are reading,
+    // `CT_BOT_PREVIOUS` remembers that an earlier one was a bot's.
+    function test_comment_bot_provenance() {
+        $conf = $this->conf;
+        $conf->qe("delete from PaperComment where paperId=1");
+
+        $conf->qe("insert into ContactInfo set email=?, firstName=?, lastName=?, password=?, cflags=?, roles=?",
+                  "provenance@bot.invalid", "Provenance", "Bot", " unset",
+                  Contact::CF_BOT, Contact::ROLE_PC);
+        $conf->invalidate_caches("users", "pc");
+        $bot = $conf->checked_user_by_email("provenance@bot.invalid");
+        xassert($bot->is_bot());
+
+        $save = function ($user, $crow, $text) {
+            $cs = new CommentStatus($user);
+            xassert($cs->prepare_save($crow, ["text" => $text, "visibility" => "pc",
+                                              "docs" => $crow->attachments()->as_list()]),
+                    $cs->full_feedback_text());
+            xassert($cs->execute_save(), $cs->full_feedback_text());
+            $cid = $crow->commentId;
+            return $this->conf->checked_paper_by_id(1)->fetch_comments("commentId={$cid}")[0];
+        };
+        $bits = function ($crow) {
+            return [($crow->commentType & CommentInfo::CT_BOT) !== 0,
+                    ($crow->commentType & CommentInfo::CT_BOT_PREVIOUS) !== 0];
+        };
+
+        // a bot writes it: this version is a bot's, and there is no earlier one
+        $prow = $conf->checked_paper_by_id(1);
+        $crow = $save($bot, CommentInfo::make_new_template($bot, $prow), "Bot wrote this");
+        xassert_eqq($bits($crow), [true, false]);
+
+        // a person edits it: the version is theirs, the bot is remembered
+        $crow = $save($this->u_chair, $crow, "Chair edited it");
+        xassert_eqq($bits($crow), [false, true]);
+
+        // the person edits again: the memory does not fade
+        $crow = $save($this->u_chair, $crow, "Chair edited it twice");
+        xassert_eqq($bits($crow), [false, true]);
+
+        // the bot edits again: both, since a previous version was a bot's too
+        $crow = $save($bot, $crow, "Bot edited it again");
+        xassert_eqq($bits($crow), [true, true]);
+
+        // and the bits survive the round trip through the database
+        $fresh = $conf->checked_paper_by_id(1)->fetch_comments("commentId={$crow->commentId}")[0];
+        xassert_eqq($bits($fresh), [true, true]);
+
+        // `fix_type` rebuilds a response's type from scratch, so the bits have
+        // to be named there or provenance is lost on the paths that matter
+        // most: an agent writing on the authors' behalf
+        $rrd = $conf->response_round_list()[0];
+        $rcrow = $save($bot,
+            CommentInfo::make_response_template($rrd, $conf->checked_paper_by_id(1)),
+            "Bot drafted the response");
+        xassert(($rcrow->commentType & CommentInfo::CT_RESPONSE) !== 0);
+        xassert_eqq($bits($rcrow), [true, false]);
+        $rcrow = $save($this->u_chair, $rcrow, "Chair revised the response");
+        xassert_eqq($bits($rcrow), [false, true]);
+
+        // and `fix_type` keeps them when it normalizes a type, so a caller that
+        // writes back what `requested_type` returns does not drop provenance
+        foreach ([$rcrow, $crow] as $xcrow) {
+            $t = $xcrow->commentType | CommentInfo::CTM_BOT;
+            xassert_eqq($xcrow->fix_type($t) & CommentInfo::CTM_BOT,
+                        CommentInfo::CTM_BOT);
+            xassert_eqq($xcrow->requested_type(["text" => "x"]) & CommentInfo::CT_BOT_PREVIOUS,
+                        $xcrow->commentType & CommentInfo::CT_BOT_PREVIOUS);
+        }
+
+        // a comment a person wrote alone carries neither bit
+        $crow2 = $save($this->u_chair,
+            CommentInfo::make_new_template($this->u_chair, $conf->checked_paper_by_id(1)),
+            "Person wrote this");
+        xassert_eqq(($crow2->commentType & CommentInfo::CTM_BOT), 0);
+
+        $conf->qe("delete from PaperComment where paperId=1");
+        $conf->qe("delete from ContactInfo where email=?", "provenance@bot.invalid");
+        $conf->invalidate_caches("users", "pc");
+        MailChecker::clear();
+    }
+
     // A staged attachment change is visible through has_attachments()/
     // attachments() before save (the comment reads as its unsaved version),
     // and abort_prop() reverts it.
@@ -1823,13 +3373,59 @@ class Comments_Tester {
         ], ["notify" => "off", "dry_run" => 1]);
         $j = call_api("=comments", $this->u_chair, $qreq);
         xassert($j->ok);
-        xassert_eqq($j->dry_run, true);
         xassert(!isset($j->comments));
         xassert_eqq($j->status_list[0]->valid, true);
+        xassert_eqq($j->status_list[0]->dry_run ?? false, true);
         xassert_eqq($j->status_list[1]->valid, true);
+        xassert_eqq($j->status_list[1]->dry_run ?? false, true);
         xassert_eqq($this->conf->fetch_ivalue("select count(*) from PaperComment where paperId=1"), $b1);
         xassert_eqq($this->conf->fetch_ivalue("select count(*) from PaperComment where paperId=3"), $b3);
 
+        MailChecker::clear();
+    }
+
+    // `dry_run=if_warning` applies per item: a warned item is withheld while its
+    // neighbors in the same batch still commit.
+    function test_comments_multi_post_if_warning() {
+        $paper1 = $this->conf->checked_paper_by_id(1);
+        xassert_eqq($this->conf->setting("viewrev"), null);
+        $this->conf->save_refresh_setting("viewrev", 1);
+        MailChecker::clear();
+        $before = $this->ncomments(1);
+
+        $qreq = TestQreq::post_json([
+            ["pid" => 1, "text" => "Batch warn @Mark Handley", "visibility" => "rev"],
+            ["pid" => 1, "text" => "Batch clean", "visibility" => "rev"]
+        ], ["dry_run" => "if_warning"]);
+        $j = call_api("=comments", $this->u_chair, $qreq);
+        xassert($j->ok);
+        // the request as a whole is not a dry run
+        xassert(!($j->dry_run ?? false));
+
+        // item 0 warned, so it was validated but not stored
+        xassert_eqq($j->status_list[0]->valid, true);
+        xassert_eqq($j->status_list[0]->dry_run ?? false, true);
+        xassert_eqq($j->status_list[0]->change_list, ["new", "text", "visibility"]);
+        xassert(!isset($j->status_list[0]->cid));
+
+        // item 1 was clean, so it committed
+        xassert_eqq($j->status_list[1]->valid, true);
+        xassert(!($j->status_list[1]->dry_run ?? false));
+        xassert(isset($j->status_list[1]->cid));
+
+        // `comments` is present, with `null` for the withheld item
+        xassert_eqq(count($j->comments), 2);
+        xassert_eqq($j->comments[0], null);
+        xassert_eqq($j->comments[1]->text, "Batch clean");
+
+        xassert_eqq($this->ncomments(1), $before + 1);
+
+        $j = call_api("=comment", $this->u_chair,
+            ["c" => (string) $j->comments[1]->cid, "delete" => 1], $paper1);
+        xassert($j->ok);
+        xassert_eqq($this->ncomments(1), $before);
+
+        $this->conf->save_refresh_setting("viewrev", null);
         MailChecker::clear();
     }
 
@@ -2023,6 +3619,33 @@ class Comments_Tester {
         xassert_not_str_contains($exists, "200 ");
         $conf->qe("delete from PaperComment where paperId=2 and (commentType&?)!=0",
             CommentInfo::CT_RESPONSE);
+        xassert_eqq($exists, $absent);
+    }
+
+    function test_comment_api_post_hides_response_existence() {
+        // posting to a response round says nothing about whether a response
+        // the poster can't see exists
+        $conf = $this->conf;
+        $u = $this->u_mgbaker;
+        $p2 = $conf->checked_paper_by_id(2);
+        xassert(!$u->can_manage($p2));
+        $nresponses = function () use ($conf) {
+            return $conf->fetch_ivalue("select count(*) from PaperComment where paperId=2 and (commentType&?)!=0",
+                CommentInfo::CT_RESPONSE);
+        };
+
+        $this->add_draft_response(2);
+        $p2 = $conf->checked_paper_by_id(2);
+        $exists = $this->cmt_observable("=comment", $u, ["response" => "1", "text" => "x"], $p2);
+        xassert_eqq($nresponses(), 1);
+
+        $conf->qe("delete from PaperComment where paperId=2 and (commentType&?)!=0",
+            CommentInfo::CT_RESPONSE);
+        $p2 = $conf->checked_paper_by_id(2);
+        $absent = $this->cmt_observable("=comment", $u, ["response" => "1", "text" => "x"], $p2);
+        xassert_eqq($nresponses(), 0);
+
+        xassert_str_contains($exists, "allowed to respond");
         xassert_eqq($exists, $absent);
     }
 

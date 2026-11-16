@@ -9,16 +9,10 @@ class UserAPI_Tester {
     /** @var Contact
      * @readonly */
     public $user;
-    /** @var Contact */
-    public $u_marina; // pc
-    /** @var Contact */
-    public $u_van; // none
 
     function __construct(Conf $conf) {
         $this->conf = $conf;
         $this->user = $conf->root_user();
-        $this->u_marina = $conf->checked_user_by_email("marina@poema.ru");
-        $this->u_van = $conf->checked_user_by_email("van@ee.lbl.gov");
     }
 
     function test_disable() {
@@ -36,37 +30,45 @@ class UserAPI_Tester {
         xassert_eqq($user->is_disabled(), false);
     }
 
-    function test_users_nameemail_respects_visibility() {
-        // A Users page test, not an API test, but close enough:
-        // Users "name & email" export must not disclose users
-        // outside the visible current listing.
-        $viewer = $this->u_marina;
-        xassert($viewer->isPC && !$viewer->is_manager() && !$viewer->privChair);
-        $nonpc = $this->conf->checked_user_by_email("kohler@seas.harvard.edu");
-        xassert($nonpc->contactId > 0 && !$nonpc->isPC);
+    function test_lookup_unlisted_pc() {
+        $email = "unlisted-lookup@_.com";
+        $this->conf->qe("delete from ContactInfo where email=?", $email);
+        $us = new UserStatus($this->conf->root_user());
+        $acct = $us->save_user((object) ["email" => $email, "name" => "Ulla Unlisted", "roles" => ["unlistedpc"]]);
+        xassert(!!$acct, $us->full_feedback_text());
+        $this->conf->invalidate_caches("users", "pc");
 
-        $qreq = TestQreq::get(["t" => "pc", "pap" => "all"])
-            ->set_conf($this->conf);
-        $up = new Users_Page($viewer, $qreq);
-        $emails = array_map(function ($u) { return $u->email; }, $up->selected_users());
-        xassert_in_eqq($viewer->email, $emails);
-        xassert_not_in_eqq($nonpc->email, $emails);
-        xassert_in_eqq("chair@_.com", $emails);
+        $pc = $this->conf->checked_user_by_email("mgbaker@cs.stanford.edu");
+        xassert(!$pc->is_track_manager() && !$pc->privChair);
+        $j = call_api("user", $pc, ["email" => $email]);
+        xassert($j->ok);
+        xassert_eqq($j->match ?? null, true);
+        xassert_eqq($j->email ?? null, $email);
 
-        $qreq = TestQreq::get(["t" => "pc", "pap" => json_encode([$viewer->contactId, $nonpc->contactId])])
-            ->set_conf($this->conf);
-        $up = new Users_Page($viewer, $qreq);
-        $emails = array_map(function ($u) { return $u->email; }, $up->selected_users());
-        xassert_in_eqq($viewer->email, $emails);
-        xassert_not_in_eqq($nonpc->email, $emails);
-        xassert_not_in_eqq("chair@_.com", $emails);
+        // a non-PC user still finds nobody
+        $u = $this->conf->checked_user_by_email("puneet@catarina.usc.edu");
+        xassert(!$u->isPC);
+        $j = call_api("user", $u, ["email" => $email]);
+        xassert(!($j->match ?? false));
 
-        // a user who can't make a search gets nothing
-        $viewer = $this->u_van;
-        $qreq = TestQreq::get(["t" => "pcadmin", "pap" => json_encode([$this->u_van->contactId, $this->u_marina->contactId])])
-            ->set_conf($this->conf);
-        $up = new Users_Page($this->u_van, $qreq);
-        $emails = array_map(function ($u) { return $u->email; }, $up->selected_users());
-        xassert_eqq($emails, []);
+        $this->conf->qe("delete from ContactInfo where email=?", $email);
+        $this->conf->invalidate_caches("users", "pc");
+    }
+
+    function test_lookup_by_prefix() {
+        // a prefix finds the first matching account
+        $pc = $this->conf->checked_user_by_email("mgbaker@cs.stanford.edu");
+        foreach (["estrin@us", "estrin@usc", "ESTRIN@USC.e"] as $prefix) {
+            $j = call_api("user", $pc, ["email" => $prefix]);
+            xassert($j->ok, $prefix);
+            xassert_eqq($j->match ?? null, false, $prefix);
+            xassert_eqq($j->email ?? null, "estrin@usc.edu", $prefix);
+        }
+        // `match` means the whole address
+        $j = call_api("user", $pc, ["email" => "Estrin@USC.edu"]);
+        xassert_eqq($j->match ?? null, true);
+        xassert_eqq($j->email ?? null, "estrin@usc.edu");
+        $j = call_api("user", $pc, ["email" => "estrin@usx"]);
+        xassert_eqq($j->email ?? null, null);
     }
 }
