@@ -73,25 +73,27 @@ rendering instead:
 * `text` returns the reviews as text, in the format produced by the “Reviews”
   download on a submission list.
 * `form` returns the reviews as **offline review forms**, the same format
-  produced by the “Review forms” download—and accepted back by
-  [`review` POST](#post-review) and [`reviews` POST](#post-reviews). Fetching a
-  form requires only permission to view the review; whether the form can be
-  uploaded again is decided when it is uploaded.
+  produced by the “Review forms” download and accepted back by [POST
+  `review`](#post-review) and [`reviews`](#post-reviews). Though this format
+  is intended for editing, you can fetch forms for reviews you can’t edit.
 
 [`reviews`](#get-reviews) additionally accepts `textzip` and `formzip`, which
-return the same renderings packaged as a ZIP archive with one file per review,
-named for the review’s ordinal ID (for instance `review18A.txt`).
+return the same renderings packaged as a ZIP archive with one file per review.
+The files are named with review ordinals (`review18A.txt` or
+`review18r193.txt`) or, for the caller’s own review forms, submission IDs
+(`review18.txt`).
 
-A non-`json` format returns the rendering as the raw response body, without any
-JSON wrapper: `text/plain` for `text` and `form`, `application/zip` for the ZIP
-formats. Errors are still reported as JSON objects with `ok` set to `false`, so
-check the response’s `Content-Type` or status code. An empty selection yields an
-empty download, just as `format=json` yields an empty `reviews` array.
+The `json` and `text` formats return existing reviews, but the `form` format
+will synthesize blank review forms when possible. [`review`](#get-review) does
+so when `r` is omitted, and [`reviews`](#get-reviews) does so for selected
+submissions with no review by the selected reviewer. Either way the caller
+must be allowed to create that review.
 
-A rendering has no `message_list`, so the search diagnostics `format=json` would
-report are carried into the download instead: `text` prefixes them, `form`
-includes them as `==-==` comment lines, and the ZIP formats collect them in a
-`README-warnings.txt` member.
+A non-`json` format returns the rendering as the raw response body, without
+any JSON wrapper: `text/plain` for `text` and `form`, `application/zip` for
+the ZIP formats. Warnings are included in the text, or, for ZIP formats, in a
+`README-warnings.txt` file. Errors are still reported as JSON objects with
+`ok` set to `false`.
 
 Renderings are conditionally requestable through `ETag` and `If-None-Match`.
 Date-based conditions are ignored, since a rendering depends on more than the
@@ -112,11 +114,7 @@ client can download an object, edit it, and upload it again:
 
 The non-`json` formats are already bare files, so they are attachments by
 default; `download=0` requests them inline instead, which is useful for reading
-a review in a browser tab. Conversely `format=json` is enveloped and inline by
-default.
-
-Because a bare payload has no `message_list`, `download=1` discards search
-diagnostics. Errors still arrive in the usual envelope.
+a review in a browser tab.
 
 
 # get /{p}/review
@@ -128,8 +126,11 @@ returned in the `review` field as a [review object](#tag-reviews). If the
 review does not exist the response is a `404`; if it exists but the caller may
 not see it, a `403`.
 
+* scope review:read
 * param p pid
-* param r rid: Review to return, as a numeric review ID or a display ordinal (`A`).
+* param ?r rid: Review to return, as a numeric review ID or a display ordinal
+  (`A`). May be omitted with `format=form` to request the caller’s own review
+  form.
 * param ?format =json|text|form
 
     How to render the review (see [Response formats](#tag-reviews)). `json` (the
@@ -197,9 +198,15 @@ The API also supports form upload using the parameter conventions of the HotCRP
 web application. These conventions are subject to change, and third-party
 applications should prefer JSON.
 
-To test a modification without saving, supply a `dry_run=1` parameter. This will
-test the input but make no changes to the database.
+To test a modification without saving, supply a `dry_run=1` parameter. This
+will test the input but make no visible changes to the database. Supply
+`dry_run=if_warning` to save only if the modification produces no warnings, or
+`dry_run=if_error` to save unless it produces an error (some mistakes, such as
+review fields with invalid values, are reported as errors but do not
+ordinarily prevent saving). The response reports `dry_run` when a save was
+withheld.
 
+* scope review:write
 * param ?p pid: Submission to review. Optional when the JSON or text data
   supplies a `pid`; if both are present they must match.
 * param ?r rid: Review to create or modify: `new`, a numeric review ID, a
@@ -207,11 +214,6 @@ test the input but make no changes to the database.
 * param ?u email: Reviewer whose review to create or modify; defaults to the
   caller. Naming another user requires administrator privilege, and must agree
   with any reviewer named by `r` or by the data.
-* param ?create_users boolean: False refuses to create an account for a reviewer
-  who does not have one. Defaults to true, except for offline review forms.
-* param ?disable_users boolean: True disables any newly-created users.
-
-    * badge admin
 * body application/json review: A [review object](#tag-reviews) sent as a raw JSON body.
 
     * oneof body
@@ -224,8 +226,8 @@ test the input but make no changes to the database.
 * param ?upload upload_token: An [upload token](#post-upload) for a previously-uploaded JSON or text file.
 
     * oneof body
-* param ?dry_run boolean: True checks input for errors, but does not save changes.
-* param ?override boolean: Administrators only: bypass deadline and other soft checks.
+* param ?dry_run dry_run_mode: True checks input for errors, but does not save changes; `if_warning` saves only if there are no errors or warnings, `if_error` only if there are no errors.
+* param ?override boolean: Submission administrators only: edit reviews whose editing deadline has passed.
 * param ?if_vtag_match integer: Reject the modification unless the review’s
   current version tag equals this value. `0` matches only a review that does not
   yet exist, so `r=new` implies `if_vtag_match=0`.
@@ -235,6 +237,12 @@ test the input but make no changes to the database.
 
     * default true
     * badge admin
+* param ?create_users boolean: False refuses to create an account for a reviewer
+  who does not have one. Defaults to true, except for offline review forms.
+* param ?disable_users boolean: True disables any newly-created users.
+
+    * badge admin
+* param ?link_fields boolean: True means warnings contain fragment links to review fields.
 * response ?dry_run boolean: True for `dry_run` requests.
 * response ?+valid boolean: True if and only if the modification was valid.
 
@@ -269,12 +277,15 @@ Delete the review on submission `p` selected by `r` (a numeric review ID or a
 display ordinal; an empty `r` addresses the caller’s own review). Only
 administrators may delete reviews.
 
-To test without deleting, supply `dry_run=1`. The edit-conflict preconditions
-`if_vtag_match` and `if_unmodified_since` behave as for [`POST /review`](#post-review).
+To test without deleting, supply `dry_run=1`, or `if_warning` or `if_error` to
+delete only if the request produces no warnings or no errors. The
+edit-conflict preconditions `if_vtag_match` and `if_unmodified_since` behave
+as for [`POST /review`](#post-review).
 
+* scope review:admin
 * param ?r rid: Review to delete: a numeric review ID or display ordinal, or
   empty for the caller’s own review.
-* param ?dry_run boolean: True checks the request but does not delete.
+* param ?dry_run dry_run_mode: True checks the request but does not delete; `if_warning` deletes only if there are no errors or warnings, `if_error` only if there are no errors.
 * param ?if_vtag_match integer: Reject the delete unless the review’s current
   version tag equals this value.
 * param ?if_unmodified_since string: Reject the delete if the review has been
@@ -302,13 +313,19 @@ diagnostics, if any, are reported in `message_list`.
 The optional `rq` and `u` parameters filter which *reviews* are returned (not
 which submissions are searched). Supply at most one of them:
 
-* `u` returns only reviews written by the user with that email.
+* `u` returns only reviews written by the user with that email; `u=me` names
+  the caller.
 * `rq` is a review search expression (the same syntax as a `re:` search), and
   returns only matching reviews.
 
 `reviewer` is a *search* parameter, like `q` and `t`: it sets the perspective the
 submission search uses. It does not restrict which reviews are returned.
 
+When `format=form` or `formzip` and `rq` is not set, then `u` defaults to
+`me`, and a selected submission that has no corresponding review yields a
+blank form for that submission.
+
+* scope review:read
 * param ?q search_string: Search selecting submissions whose reviews to return. Required unless `p` is given.
 * param ?t search_scope: Scope of search; defaults to the submissions the caller can view.
 
@@ -321,7 +338,8 @@ submission search uses. It does not restrict which reviews are returned.
 * param ?rq string: Review search expression limiting which reviews are returned.
 
     * oneof review_query
-* param ?u email: Return only reviews written by this user.
+* param ?u email: Return only reviews written by this user; `me` names the
+  caller.
 
     * oneof review_query
 * param ?format =json|text|form|textzip|formzip
@@ -364,17 +382,20 @@ submissions. The modification may be supplied as:
    sections. Every section is applied to the submission it names; there is no
    single-submission restriction.
 
-Each review is processed independently and best-effort: one item’s failure does
-not roll back the others. The response reports one entry per input review, in
-order, in `status_list`; the parallel `reviews` array holds the resulting
-[review object](#tag-reviews) for each committed item (and `null` for items that
-were invalid or skipped). A `dry_run=1` request validates every item but commits
-nothing.
+Each review is processed independently: one item’s failure does not roll back
+the others. The response reports one entry per input review, in order, in
+`status_list`; the parallel `reviews` array holds the resulting [review
+object](#tag-reviews) for each committed item (and `null` for items that were
+invalid or skipped). A `dry_run=1` request validates every item but commits
+nothing; a `dry_run=if_warning` request commits each item that produces no
+warnings or errors, and `dry_run=if_error` each item that produces no errors,
+leaving `null` in `reviews` for the items they withhold.
 
 The `if_vtag_match` and `if_unmodified_since` request parameters set batch-wide
 default preconditions, applied to every item that does not specify its own. In
 particular, `if_vtag_match=0` requires that every saved review be newly created.
 
+* scope review:write
 * body application/json [review]: An array of [review objects](#tag-reviews),
   each naming its submission with `pid`.
 
@@ -388,8 +409,8 @@ particular, `if_vtag_match=0` requires that every saved review be newly created.
 * param ?upload upload_token: An [upload token](#post-upload) for a previously-uploaded JSON or text file.
 
     * oneof body
-* param ?dry_run boolean: True checks every item for errors, but does not save changes.
-* param ?override boolean: Administrators only: bypass deadline and other soft checks.
+* param ?dry_run dry_run_mode: True checks every item for errors, but does not save changes; `if_warning` saves each item only if that item has no errors or warnings, `if_error` only if it has no errors.
+* param ?override boolean: Submission administrators only: edit reviews whose editing deadline has passed.
 * param ?if_vtag_match integer: Batch-wide default version-tag precondition,
   overridable by a review object’s own `if_vtag_match`. `if_vtag_match=0`
   requires that every saved review be newly created.
@@ -400,7 +421,11 @@ particular, `if_vtag_match=0` requires that every saved review be newly created.
 
     * default true
     * badge admin
-* response ?dry_run boolean: True for `dry_run` requests.
+* param ?create_users boolean: False refuses to create an account for a reviewer
+  who does not have one. Defaults to true, except for offline review forms.
+* param ?disable_users boolean: True disables any newly-created users.
+
+    * badge admin
 * response ?+status_list [review_update_status]: Per-review results, one entry per
   input object (same length and order as the input). Entry *i* reports `valid`,
   `change_list` (beginning with `"new"` for a created review), the submission’s
@@ -426,6 +451,7 @@ or, for an incremental edit, a **review delta** (`object: "review_delta"`) that
 records only the fields that changed in that version. Set `expand=1` to receive
 every version as a full review object instead of a delta.
 
+* scope review:read
 * param r rid: Review whose history to return, as a numeric review ID or ordinal.
 * param ?expand boolean: If true, return each version as a complete review object rather than a delta.
 * response pid pid: Submission ID.
@@ -446,6 +472,7 @@ only when the caller is allowed to rate this review. Each value is a rating (see
 [`reviewrating` POST](#post-reviewrating) for the vocabulary): the string `none`,
 a single flag, or an array of flags.
 
+* scope review:read reaction:read
 * param r rid: Review whose ratings to return.
 * response ?ratings string|[string]: Aggregate rating flags, or `none`.
 * response ?user_rating string|[string]: The caller’s own rating, or `none`.
@@ -461,8 +488,10 @@ ratings as for [`reviewrating` GET](#get-reviewrating).
 A rating is a space-separated list of flags, the string `none` to clear the
 caller’s rating, or the equivalent integer bitmask. The flags are `good`,
 `needswork`, `short`, `vague`, `narrow`, `disrespectful`, and `wrong`.
-Administrators may pass `clearall` to remove *every* rating on the review.
+Administrators may pass `clearall` to remove *every* rating on the review;
+this also requires the `reaction:admin` scope.
 
+* scope review:read reaction:write
 * param r rid: Review to rate.
 * param =user_rating string: New rating: a space-separated list of flags, `none`, or (administrators) `clearall`.
 * response ?ratings string|[string]: Updated aggregate rating flags, or `none`.
@@ -486,6 +515,7 @@ created. Administrators can set `override=1` to bypass conflict and
 prior-refusal checks that would otherwise block or downgrade the request to a
 proposal.
 
+* scope review:admin
 * param =email email: Email of the person to ask. The special value `newanonymous` (administrators only) creates an anonymous review with a token.
 * param ?=given_name string: Reviewer’s first name (used when creating a new account).
 * param ?=family_name string: Reviewer’s last name.
@@ -509,6 +539,7 @@ This acknowledges the assignment (advancing it out of the `empty` state) and, if
 the review had previously been declined, reinstates it. The response’s
 `review_site_relative` is a site-relative URL for the review page.
 
+* scope review:write
 * param r rid: Numeric review ID of the assignment to accept.
 * response action =accept: Always `accept`.
 * response review_site_relative string: Site-relative URL of the review.
@@ -523,6 +554,7 @@ Decline the review identified by `r` on submission `p`, optionally recording a
 primary or secondary review. The response’s `review_site_relative` is a
 site-relative URL for the review page.
 
+* scope review:write
 * param r rid: Numeric review ID of the assignment to decline.
 * param ?=reason string: Optional explanation, shown to the requester.
 * response action =decline: Always `decline`.
@@ -542,6 +574,7 @@ review that has already been submitted. The returned `review_site_relative` URL
 points at the review under the destination account (with a `u/<index>/` prefix
 when that account differs from the current one).
 
+* scope review:write
 * param r rid: Numeric review ID to reassign.
 * param email email: Email of the destination account; must be one you are signed in to this session.
 * response action =claim: Always `claim`.
@@ -556,6 +589,10 @@ Return the review tokens currently active in the caller’s session, in the
 `token` array (encoded form). Review tokens grant the ability to edit specific
 anonymous reviews.
 
+Bearer tokens can’t use this endpoint, since review tokens are stored in
+the session; it requires a session cookie.
+
+* scope none
 * response token [string]: Encoded review tokens active in the session.
 
 
@@ -571,5 +608,9 @@ token is activated. Submitting with no usable tokens clears the active tokens.
 For security, the session is locked out after five failed token attempts until
 the user signs out. Per-token results are reported in `message_list`.
 
+Bearer tokens can’t use this endpoint, since review tokens are stored in
+the session; it requires a session cookie.
+
+* scope none
 * param ?token string: Review token(s) to activate, separated by whitespace or commas, or a JSON array. Omit (or pass none) to clear active tokens.
 * response token [string]: Encoded review tokens active after the change.

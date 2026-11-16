@@ -155,18 +155,18 @@ class AuthorCertification_Tester {
             "{$this->c2key}:1:value" => 1,
             "status:submit" => 1
         ])->set_user($this->u_sally), $this->paper()));
-        xassert_array_eqq($ps->change_list(), ["aucert_1", "aucert_2"], true);
+        xassert_array_eqq($ps->change_list(), ["Aucert1", "Aucert2"], true);
         xassert($ps->execute_save());
 
         $prow = $this->paper();
         $ov = $prow->option($this->cert1);
         xassert_eqq($ov->value_count(), 1);
         xassert_in_eqq($this->u_sally->contactId, $ov->value_list());
-        xassert(!$ov->option->value_present($ov));
+        xassert(!$ov->present());
         $ov = $prow->option($this->cert2);
         xassert_eqq($ov->value_count(), 1);
         xassert_in_eqq($this->u_sally->contactId, $ov->value_list());
-        xassert(!$ov->option->value_present($ov));
+        xassert(!$ov->present());
         xassert_le($prow->timeSubmitted, 0);
         xassert_le($prow->timeWithdrawn, 0);
     }
@@ -275,7 +275,7 @@ class AuthorCertification_Tester {
         $ov = $prow->option($this->cert1);
         xassert_in_eqq($this->u_sally->contactId, $ov->value_list());
         xassert_in_eqq($this->u_carole->contactId, $ov->value_list());
-        xassert($ov->option->value_present($ov));
+        xassert($ov->present());
         xassert_le($prow->timeSubmitted, 0);
         xassert_le($prow->timeWithdrawn, 0);
 
@@ -295,11 +295,11 @@ class AuthorCertification_Tester {
         $ov = $prow->option($this->cert1);
         xassert_in_eqq($this->u_sally->contactId, $ov->value_list());
         xassert_not_in_eqq($this->u_carole->contactId, $ov->value_list());
-        xassert(!$ov->option->value_present($ov));
+        xassert(!$ov->present());
         $ov = $prow->option($this->cert2);
         xassert_in_eqq($this->u_sally->contactId, $ov->value_list());
         xassert_in_eqq($this->u_carole->contactId, $ov->value_list());
-        xassert($ov->option->value_present($ov));
+        xassert($ov->present());
         xassert_gt($prow->timeSubmitted, 0); // submit finally succeeded
         xassert_le($prow->timeWithdrawn, 0);
     }
@@ -318,11 +318,11 @@ class AuthorCertification_Tester {
         $ov = $prow->option($this->cert1);
         xassert_in_eqq($this->u_sally->contactId, $ov->value_list());
         xassert_not_in_eqq($this->u_carole->contactId, $ov->value_list());
-        xassert(!$ov->option->value_present($ov));
+        xassert(!$ov->present());
         $ov = $prow->option($this->cert2);
         xassert_in_eqq($this->u_sally->contactId, $ov->value_list());
         xassert_in_eqq($this->u_carole->contactId, $ov->value_list());
-        xassert($ov->option->value_present($ov));
+        xassert($ov->present());
         xassert_gt($prow->timeSubmitted, 0); // submit finally succeeded
         xassert_le($prow->timeWithdrawn, 0);
     }
@@ -425,6 +425,30 @@ class AuthorCertification_Tester {
         $prow1 = $this->conf->checked_paper_by_id($pid1);
         xassert_le($prow1->timeWithdrawn, 0);
         xassert_le($prow1->timeSubmitted, 0);
+    }
+
+    function test_duplicate_self_certification() {
+        // listing one's own certification twice must store it once, not make
+        // the multi-row INSERT fail after the DELETE and wipe the field
+        $u = $this->u_carole;
+        $ps = new PaperStatus($u);
+        xassert($ps->prepare_save_paper_web(Qrequest::make("POST", [
+            "title" => "Duplicate certification",
+            "has_authors" => "1",
+            "authors:1:email" => $u->email,
+            "authors:2:email" => $this->u_sally->email,
+            "has_submission" => 1,
+            "has_{$this->c1key}" => "1",
+            "{$this->c1key}:1:email" => $u->email,
+            "{$this->c1key}:1:value" => "1",
+            "{$this->c1key}:2:email" => $u->email,
+            "{$this->c1key}:2:value" => "1"
+        ])->set_file_content("submission:file", "%PDF-x", null, "application/pdf")
+          ->set_user($u), null));
+        xassert($ps->execute_save());
+        $ov = $this->conf->checked_paper_by_id($ps->paperId)->option($this->cert1);
+        xassert_in_eqq($u->contactId, $ov->value_list());
+        xassert_eqq($ov->value_count(), 1);
     }
 
     function finalize() {

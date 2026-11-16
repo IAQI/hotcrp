@@ -39,7 +39,14 @@ object is returned in the `paper` response field. Error messages—for
 instance, about permission errors or nonexistent submissions—are returned in
 `message_list`.
 
+* scope submeta:read
 * param ?forceShow
+* param ?word_limit =soft|hard: Which word limit applies to long text fields.
+  `soft` (the default) returns each field cut at its word limit; `hard` returns
+  the full text, cut only at the hard word limit (if any). Fields over a limit
+  are named in the response’s `overlong` and `truncated` keys.
+
+    * default soft
 * param ?download boolean: True returns the bare submission object as a file
   (see [Downloads](#tag-submissions)) instead of the usual response envelope.
 * response ?paper paper: The requested submission object.
@@ -80,8 +87,18 @@ The API also supports form upload using the parameter conventions of the HotCRP
 web application. These conventions are subject to change, and third-party
 applications should prefer JSON.
 
-To test a modification without saving, supply a `dry_run=1` parameter. This will
-test the uploaded JSON but make no changes to the database.
+The [`GET /paper`](#get-paper) endpoint defaults to truncating word-limited text
+fields at their soft word limits. A field truncated this way (marked `soft`
+under the uploaded JSON‘s `truncated` key) is not saved, and is reported as an
+error. Provide `word_limit=hard` to `GET /paper` to avoid this error.
+
+To test a modification without saving, supply a `dry_run=1` parameter. This
+will test the uploaded JSON but make no visible changes to the database.
+Supply `dry_run=if_warning` to save only if the modification produces no
+warnings, or `dry_run=if_error` to save unless it produces an error (some
+mistakes, such as missing required fields or fields with invalid values, are
+reported as errors but do not ordinarily prevent saving). The response reports
+`dry_run` when a save was withheld.
 
 
 ## ZIP and form uploads
@@ -111,6 +128,11 @@ This shell session does the same, but using `multipart/form-data`.
 $ curl -H "Authorization: bearer hct_XXX" -F "json=<data.json" -F paper.pdf=@paper.pdf SITEURL/api/paper
 ```
 
+> [!CAUTION]
+> `multipart/form-data` uploads are processed by PHP, which mangles field names
+> containing spaces, periods, and brackets (for instance, `paper.pdf` becomes
+> `paper_pdf`). The example above works, but an upload may fail or have
+> unexpected results if mangled names collide.
 
 ## Administrator use
 
@@ -123,6 +145,7 @@ submission or create a new submission with that ID. To avoid overwriting an
 existing submission, set the submission JSON’s `if_unmodified_since` to
 `0`.
 
+* scope submeta:write
 * body application/json paper: A submission object sent as a raw JSON body.
 
     * oneof body
@@ -135,10 +158,12 @@ existing submission, set the submission JSON’s `if_unmodified_since` to
 * param ?upload upload_token: An [upload token](#post-upload) for a previously-uploaded JSON or ZIP file.
 
     * oneof body
-* param dry_run boolean: True checks input for errors, but does not save changes
+* param dry_run dry_run_mode: True checks input for errors, but does not save changes; `if_warning` saves only if there are no errors or warnings, `if_error` only if there are no errors
 * param ?if_unmodified_since string: Reject the modification if the submission has
   been modified since this time (a Unix timestamp, or `0`). If set, a submission
   JSON’s `if_unmodified_since` takes precedence over this parameter.
+* param ignore_unwritable_fields boolean: True ignores attempts to modify
+  unwritable fields.
 * param disable_users boolean: True disables any newly-created users.
 
     When an administrator creates submissions on behalf of other people, HotCRP
@@ -162,6 +187,10 @@ existing submission, set the submission JSON’s `if_unmodified_since` to
 
     * default true
     * badge admin
+* param ?word_limit =soft|hard: Which word limit applies to long text fields
+  in the returned submission object.
+
+    * default hard
 * response ?dry_run boolean: True for `dry_run` requests.
 * response ?pid pid: ID of the modified or newly created submission.
 * response ?+valid boolean: True if and only if the modification was valid.
@@ -189,11 +218,13 @@ existing submission, set the submission JSON’s `if_unmodified_since` to
 
 > Delete submission
 
-Delete the submission specified by `p`, a submission ID.
+Delete the submission specified by `p`, a submission ID. Deleting a submission
+deletes its reviews and comments too.
 
+* scope paper:admin
 * param ?if_unmodified_since string: Don’t delete if modified since this time
 * param ?forceShow
-* param ?dry_run boolean: True checks input for errors, but does not save changes
+* param ?dry_run dry_run_mode: True checks the request but does not delete; `if_warning` deletes only if there are no errors or warnings, `if_error` only if there are no errors
 * param ?notify boolean: False disables all email notifications
 
     * default true
@@ -207,6 +238,7 @@ Delete the submission specified by `p`, a submission ID.
 * response change_list [string]: Always `["delete"]`.
 * response ?conflict boolean: True when the delete was rejected by the
   `if_unmodified_since` edit-conflict check.
+* response ?pid pid: The deleted submission’s ID.
 * badge featured
 * badge admin
 
@@ -228,6 +260,7 @@ allowed to view submission #1010”, whereas the `/papers` request will return
 no errors. To obtain warnings for missing submissions that were explicitly
 listed in a query, supply a `warn_missing=1` parameter.
 
+* scope submeta:read
 * param q search_string: The search expression.
 * param t
 
@@ -246,6 +279,9 @@ listed in a query, supply a `warn_missing=1` parameter.
 
     * group Search modifiers
 * param warn_missing boolean: Get warnings for missing submissions
+* param ?word_limit =soft|hard: Which word limit applies to long text fields.
+
+    * default soft
 * param ?download boolean: True returns a bare array of submission objects as a
   file (see [Downloads](#tag-submissions)) instead of the usual response envelope.
 * response ?papers [paper]: The matching submission objects.
@@ -279,6 +315,7 @@ JSON modification object lacking the `pid` field. The JSON modification will
 be applied to all papers returned by the `q` search query.
 
 
+* scope submeta:admin
 * body application/json [paper]: An array of submission objects sent as a raw JSON body.
 
     * oneof body
@@ -291,7 +328,9 @@ be applied to all papers returned by the `q` search query.
 * param ?upload upload_token: An [upload token](#post-upload) for a previously-uploaded JSON or ZIP file.
 
     * oneof body
-* param dry_run boolean: True checks input for errors, but does not save changes
+* param dry_run dry_run_mode: True checks input for errors, but does not save changes; `if_warning` saves only if there are no errors or warnings, `if_error` only if there are no errors
+* param ignore_unwritable_fields boolean: True ignores attempts to modify
+  unwritable fields.
 * param disable_users boolean: True disables any newly-created users
 
     * badge siteadmin
@@ -319,8 +358,13 @@ be applied to all papers returned by the `q` search query.
 * param reviewer
 
     * group Search modifiers
-* response ?dry_run boolean: True for `dry_run` requests.
+* param ?word_limit =soft|hard: Which word limit applies to long text fields
+  in the returned submission objects.
+
+    * default hard
 * response ?papers [paper]: The modified submission objects.
+
+    * condition !dry_run
 * response ?+status_list [update_status]: Per-submission results, one entry per input object.
 
     For array input, `status_list` has the same length and order as the input:
@@ -361,6 +405,7 @@ Each entry in `potential_conflicts` carries the conflicting PC member’s `uid` 
 `potentialconflict` entry also includes a `description` (plain-text explanation)
 and a `tooltip` (HTML).
 
+* scope submeta:read
 * param ?p pid: Submission to analyze; use `new` for an unsaved submission.
 * param ?sclass string: Submission class, used when `p=new`.
 * param ?json string: JSON object of prospective `authors` and/or `collaborators` to apply to the submission before analysis.
@@ -386,6 +431,7 @@ Retrieve the share link for a submission. This link can be accessed by users not
 signed in to HotCRP; it grants view-only access to the submission and its
 documents. Only authors and submission administrators can fetch the share link.
 
+* scope submeta:admin document:read review:read comment:read
 * response ?url: The share link
 * response ?token author_view_token: Token for this share link
 * response ?token_type string: `"author_view"`
@@ -414,6 +460,7 @@ whether a link should be created; it must be one of:
 
 Only authors and submission administrators can modify a share link.
 
+* scope submeta:admin document:read review:read comment:read
 * param !share share_action
 * param ?expires_in integer
 * response !token ?author_view_token
@@ -428,4 +475,5 @@ Only authors and submission administrators can modify a share link.
 
 Delete the share link for a submission, if any has been created.
 
+* scope submeta:admin document:read review:read comment:read
 * response !token null

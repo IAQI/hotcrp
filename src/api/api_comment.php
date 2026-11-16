@@ -6,6 +6,8 @@ class Comment_API_Status implements JsonSerializable {
     /** @var int */
     public $message_count;
     /** @var bool */
+    public $dry_run;
+    /** @var bool */
     public $valid;
     /** @var list<string> */
     public $change_list;
@@ -17,14 +19,16 @@ class Comment_API_Status implements JsonSerializable {
     public $cid;
 
     /** @param int $message_count
+     * @param bool $dry_run
      * @param bool $valid
      * @param list<string> $change_list
      * @param bool $conflict
      * @param ?int $pid
      * @param ?int $cid */
-    function __construct($message_count, $valid = false, $change_list = [],
+    function __construct($message_count, $dry_run, $valid = false, $change_list = [],
                          $conflict = false, $pid = null, $cid = null) {
         $this->message_count = $message_count;
+        $this->dry_run = $dry_run;
         $this->valid = $valid;
         $this->change_list = $change_list;
         $this->conflict = $conflict;
@@ -44,11 +48,18 @@ class Comment_API_Status implements JsonSerializable {
         if ($this->cid !== null) {
             $u["cid"] = $this->cid;
         }
+        if ($this->dry_run) {
+            $u["dry_run"] = true;
+        }
         return $u;
     }
 }
 
 class Comment_API extends MessageSet {
+    // bound on attachments one request may list for a comment, and on new
+    // attachments one request may upload among all the comments it saves
+    const MAX_ATTACHMENTS = Attachments_PaperOption::MAX_PARSE_COUNT;
+
     /** @var Conf */
     private $conf;
     /** @var Contact */
@@ -61,10 +72,18 @@ class Comment_API extends MessageSet {
     private $qreq_rrd;
     /** @var ?string */
     private $qreq_review_token;
+    /** @var PaperExport */
+    private $pex;
 
     // request-global configuration
     /** @var bool */
     private $dry_run = false;
+    /** @var bool */
+    private $dry_run_if_warning = false;
+    /** @var bool */
+    private $dry_run_if_error = false;
+    /** @var bool */
+    private $dry_run_here = false;
     /** @var bool */
     private $notify = true;
     /** @var ?int */
@@ -73,6 +92,8 @@ class Comment_API extends MessageSet {
     private $single = false;
     /** @var DocumentLocator */
     private $docloc;
+    /** @var ?callable */
+    private $pre_save_function;
 
     // per-item accumulators (mirror Paper_API)
     /** @var list<Comment_API_Status> */
@@ -81,6 +102,13 @@ class Comment_API extends MessageSet {
     private $comments = [];
     /** @var int */
     private $ncomments = 0;
+
+    // request-wide attachment import state: the importer for the paper in
+    // hand, and how many more new attachments the request may upload
+    /** @var ?DocumentImporter */
+    private $docimporter;
+    /** @var int */
+    private $cost = 0;    // new attachments uploaded so far; bounded by MAX_ATTACHMENTS
 
     // current-item working state (reset per item)
     /** @var PaperInfo */
@@ -143,12 +171,32 @@ class Comment_API extends MessageSet {
             }
         }
         $this->qreq_review_token = $qreq->review_token;
+        $this->pex = new PaperExport($user);
+        if (($qreq->word_limit ?? "soft") === "soft") {
+            $this->pex->set_ignore_soft_word_limits(false);
+        } else if ($qreq->word_limit === "hard") {
+            $this->pex->set_ignore_soft_word_limits(true);
+        } else {
+            JsonResult::make_parameter_error("word_limit")->complete();
+        }
     }
+
+    /** Set a function to be called before trying to save a comment (use in tests).
+     * @param ?callable $f
+     * @return $this */
+    function set_pre_save_function($f) {
+        $this->pre_save_function = $f;
+        return $this;
+    }
+
 
     private function run_get_one(Qrequest $qreq, PaperInfo $prow) {
         // a GET with no `c`/`response` behaves like `GET /comments` (backward compat)
         if ($this->qreq_cid === null && $this->qreq_rrd === null) {
             return $this->run_get_multi($qreq, $prow);
+        }
+        if (friendly_boolean($qreq->content) === false) {
+            $this->pex->set_include_comment_content(false);
         }
         // find comment; a `cid`/`response` mismatch reads as “not found” for GET
         $this->prow = $prow;
@@ -171,13 +219,14 @@ class Comment_API extends MessageSet {
             return JsonResult::make_not_found_error("c", "<0>Comment not found");
         }
         // export and return
-        $no_content = friendly_boolean($qreq->content) === false;
-        return new JsonResult(["ok" => true, "comment" => $crow->unparse_json($this->user, $no_content)]);
+        return new JsonResult(["ok" => true, "comment" => $this->pex->comment_json($prow, $crow)]);
     }
 
     /** @return JsonResult */
     private function run_get_multi(Qrequest $qreq, ?PaperInfo $prow) {
-        $no_content = friendly_boolean($qreq->content) === false;
+        if (friendly_boolean($qreq->content) === false) {
+            $this->pex->set_include_comment_content(false);
+        }
         if (isset($qreq->q)) {
             if ($prow) {
                 return JsonResult::make_parameter_error("p", "<0>Parameter conflict with `q`");
@@ -195,7 +244,7 @@ class Comment_API extends MessageSet {
             foreach ($prow->viewable_comments($this->user) as $crow) {
                 if (!$this->qreq_rrd
                     || ($crow->is_response() && $crow->commentRound === $this->qreq_rrd->id)) {
-                    $comments[] = $crow->unparse_json($this->user, $no_content);
+                    $comments[] = $this->pex->comment_json($prow, $crow);
                 }
             }
         }
@@ -209,10 +258,13 @@ class Comment_API extends MessageSet {
 
     /** @param 1|2 $mode
      * @return JsonResult */
-    private function run_post(Qrequest $qreq, ?PaperInfo $prow, $mode) {
+    function run_post(Qrequest $qreq, ?PaperInfo $prow, $mode) {
         // set parameters
         $this->set_post_param($qreq);
-        $this->docloc = new DocumentLocator;
+        if (!isset($qreq->word_limit)) {
+            $this->pex->set_ignore_soft_word_limits(true);
+        }
+        $this->docloc = new DocumentLocator($this->conf);
 
         // check Content-Type
         if (Mimetype::is_form($qreq->body_content_type() ?? Mimetype::FORM_DATA_TYPE)
@@ -234,7 +286,17 @@ class Comment_API extends MessageSet {
     }
 
     private function set_post_param(Qrequest $qreq) {
-        $this->dry_run = friendly_boolean($qreq->dry_run) ?? false;
+        if (isset($qreq->dry_run)) {
+            if ($qreq->dry_run === "if_warning") {
+                $this->dry_run_if_warning = true;
+            } else if ($qreq->dry_run === "if_error") {
+                $this->dry_run_if_error = true;
+            } else if (($dr = friendly_boolean($qreq->dry_run)) !== null) {
+                $this->dry_run = $dr;
+            } else {
+                JsonResult::make_parameter_error("dry_run")->complete();
+            }
+        }
         $this->notify = friendly_boolean($qreq->notify) !== false;
         if (isset($qreq->if_unmodified_since)) {
             $t = Paper_API::parse_if_unmodified_since($qreq->if_unmodified_since, $this->conf);
@@ -316,6 +378,7 @@ class Comment_API extends MessageSet {
         $this->stale = false;
         $this->ivalid = false;
         $this->change_list = null;
+        $this->dry_run_here = $this->dry_run;
     }
 
     /** Resolve one item's paper and target, then save it, recording the outcome
@@ -382,6 +445,20 @@ class Comment_API extends MessageSet {
      * @param ?ResponseRound $rrd
      * @return ?CommentInfo the existing comment, or null if none matches */
     private function locate_target($cid, $rrd) {
+        // comment/response name (based on what was used to find it)
+        if ($rrd) {
+            if ($rrd->unnamed) {
+                $this->uccmttype = "Response";
+                $this->lccmttype = "response";
+            } else {
+                $this->uccmttype = $this->lccmttype = "{$rrd->name} response";
+            }
+        } else {
+            $this->uccmttype = "Comment";
+            $this->lccmttype = "comment";
+        }
+
+        // find comment
         $crow = null;
         if ($cid > 0) {
             $crow = self::find_comment($this->prow, "commentId={$cid}");
@@ -400,19 +477,6 @@ class Comment_API extends MessageSet {
                 || ($cid !== null && $cid !== $crow->commentId)) {
                 $this->stale = true;
             }
-        }
-
-        // comment/response name
-        if ($this->rrd) {
-            if ($this->rrd->unnamed) {
-                $this->uccmttype = "Response";
-                $this->lccmttype = "response";
-            } else {
-                $this->uccmttype = $this->lccmttype = "{$this->rrd->name} response";
-            }
-        } else {
-            $this->uccmttype = "Comment";
-            $this->lccmttype = "comment";
         }
         return $crow;
     }
@@ -507,10 +571,17 @@ class Comment_API extends MessageSet {
         if ($this->user->can_manage($this->prow)) {
             $this->status = 403;
             $this->error_at(null, "<0>You aren’t allowed to view that {$this->lccmttype}");
-        } else {
-            $this->status = 404;
-            $this->error_at(null, "<0>{$this->uccmttype} not found");
+            return null;
         }
+        // to a user who couldn't write it anyway, a hidden response
+        // addressed by round looks like no response
+        if ($rrd !== null
+            && !($cid > 0)
+            && !$this->user->can_edit_response($this->prow, $crow)) {
+            return CommentInfo::make_response_template($this->rrd, $this->prow);
+        }
+        $this->status = 404;
+        $this->error_at(null, "<0>{$this->uccmttype} not found");
         return null;
     }
 
@@ -520,14 +591,11 @@ class Comment_API extends MessageSet {
      * @param array<string,mixed> $req
      * @param CommentInfo $crow an existing comment or a fresh skeleton */
     private function execute_save($req, $crow) {
-        if (!$this->has_error_since($this->item_message_count)) {
-            // optimistic-concurrency precondition (a fresh skeleton has
-            // timeModified 0, so a new comment never trips this)
-            if ($req["if_unmodified_since"] !== null
-                && $req["if_unmodified_since"] < $crow->timeModified) {
-                $this->stale = true;
-            }
+        if ($this->pre_save_function) {
+            call_user_func($this->pre_save_function);
+        }
 
+        if (!$this->has_error_since($this->item_message_count)) {
             // process the request. A stale edit still runs so its attempted
             // `change_list` is computed, but `save_comment` aborts rather than
             // committing (leaving `$crow` at the server's current version).
@@ -536,19 +604,19 @@ class Comment_API extends MessageSet {
 
         // report the conflict unless a more fundamental error intervened
         // (`save_comment` returns null when it records a hard error)
-        if ($this->stale && $crow !== null) {
+        if ($this->stale && $crow) {
             $this->error_at("if_unmodified_since", "<5><strong>Edit conflict</strong>: The {$this->lccmttype} was edited concurrently");
         }
 
         $cid = $crow && $crow->commentId > 0 ? $crow->commentId : null;
-        if ($cid !== null && !$this->dry_run) {
-            $this->comments[] = $crow->unparse_json($this->user);
+        if ($cid !== null && !$this->dry_run_here) {
+            $this->comments[] = $this->pex->comment_json($crow->prow, $crow);
             ++$this->ncomments;
         } else {
             $this->comments[] = null;
         }
         $this->status_list[] = new Comment_API_Status(
-            $this->message_count(),
+            $this->message_count(), $this->dry_run_here,
             $this->ivalid, $this->change_list ?? [],
             $this->stale, $this->prow->paperId, $cid
         );
@@ -613,26 +681,61 @@ class Comment_API extends MessageSet {
             $req["docs"] = [];
             return $req;
         }
-        $req["text"] = isset($jp->text) ? rtrim(cleannl((string) $jp->text)) : "";
+        // absent text is resolved once the target comment is known
+        $req["text"] = isset($jp->text) ? rtrim(cleannl((string) $jp->text)) : null;
+        // text cut at a word limit: the soft cut loses visible text
+        $band = isset($jp->text) ? ((array) ($jp->truncated ?? []))["text"] ?? null : null;
+        if ($band === "soft") {
+            $this->error_at("text", $this->conf->_("<0>Refusing to save truncated comment"));
+            $this->inform_at("text", $this->conf->_("<0>Request the comment with ‘word_limit=hard’ to edit it."));
+            return null;
+        } else if ($band === "hard") {
+            $this->warning_at("text", $this->conf->_("<0>Text was cut at the hard word limit"));
+        }
         if (isset($jp->tags)) {
             $req["tags"] = is_array($jp->tags) ? join(" ", $jp->tags) : $jp->tags;
         }
         return $req;
     }
 
+    /** Return true if attachment descriptor `$dj` just names one of a
+     * comment’s current attachments (with IDs `$docids`), without content,
+     * so that importing it cannot store a new document.
+     * @param mixed $dj
+     * @param list<int> $docids
+     * @return bool */
+    static private function is_attachment_reference($dj, $docids) {
+        if ($dj instanceof DocumentInfo) {
+            return $dj->paperStorageId > 0;
+        }
+        return is_object($dj)
+            && is_int($dj->docid ?? null)
+            && in_array($dj->docid, $docids, true)
+            && !isset($dj->content)
+            && !isset($dj->content_base64)
+            && !isset($dj->content_file);
+    }
+
     /** Import the request's attachments now that the target comment is known.
      * A form request's descriptors come from `parse_qreq_prefix`; a JSON
      * request's from its `docs` value (missing/null retains the existing
-     * attachments, `false` clears them, a list is authoritative).
+     * attachments, `false` clears them, a list is authoritative). A list
+     * longer than MAX_ATTACHMENTS fails, and so does one whose new uploads
+     * would take the request past MAX_ATTACHMENTS of those.
      * @param array<string,mixed> $req
      * @param CommentInfo $xcrow
      * @return ?list<DocumentInfo> */
     private function import_docs($req, $xcrow) {
         $existing = $xcrow->commentId ? $xcrow->attachments()->as_list() : [];
+        // bound the list -- though a comment that somehow has more may keep
+        // that many, and, as with upload size limits, a site administrator’s
+        // JSON is exempt
+        $max = max(self::MAX_ATTACHMENTS, count($existing));
         $src = $req["docs_src"];
+        $exempt = $this->user->privChair && !($src instanceof Qrequest);
         if ($src instanceof Qrequest) {
             $descriptors = Attachments_PaperOption::parse_qreq_prefix(
-                $this->prow, $src, "attachment", DTYPE_COMMENT, $existing, $this
+                $this->prow, $src, "attachment", DTYPE_COMMENT, $existing, $max, $this
             );
         } else if (!isset($src->docs)) {
             return $existing;
@@ -640,14 +743,49 @@ class Comment_API extends MessageSet {
             return [];
         } else {
             $descriptors = is_array($src->docs) ? $src->docs : [$src->docs];
+            if (count($descriptors) > $max && !$exempt) {
+                $descriptors = null;
+            }
+        }
+        if ($descriptors === null) {
+            $this->error_at("docs", $this->conf->_("<0>Too many attachments (at most {max})", new FmtArg("max", $max)));
+            $this->status = 400;
+            return null;
         }
 
-        // a comment may retain only its own attachments by `docid`
-        $di = (new DocumentImporter($this->prow, DTYPE_COMMENT, 0, $this, "docs"))
-            ->set_allowed_docids($xcrow->attachment_ids())
-            ->on_import([$this->docloc, "on_document_import"]);
+        // the request is charged (below, per attempt) for each descriptor
+        // that might store a document -- that does not just name one of this
+        // comment’s attachments, as an edit that keeps them does -- so that
+        // a request saving many comments uploads at most MAX_ATTACHMENTS
+        // between them: first check that this comment’s would fit
+        $docids = $xcrow->attachment_ids();
+        if (!$exempt) {
+            $nupload = 0;
+            foreach ($descriptors as $dj) {
+                if (!self::is_attachment_reference($dj, $docids)) {
+                    ++$nupload;
+                }
+            }
+            if ($this->cost + $nupload > self::MAX_ATTACHMENTS) {
+                $this->error_at("docs", $this->conf->_("<0>Too many attachments (at most {max} new per request)", new FmtArg("max", self::MAX_ATTACHMENTS)));
+                $this->status = 400;
+                return null;
+            }
+        }
+
+        // comments on the paper in hand share an importer, and thus its
+        // index of the paper’s stored documents; a comment may retain only
+        // its own attachments by `docid`
+        if (!$this->docimporter || $this->docimporter->prow !== $this->prow) {
+            $this->docimporter = (new DocumentImporter($this->prow, DTYPE_COMMENT, 0, $this, "docs"))
+                ->on_import([$this->docloc, "on_document_import"]);
+        }
+        $di = $this->docimporter->set_allowed_docids($docids);
         $docs = [];
         foreach ($descriptors as $dj) {
+            if (!$exempt && !self::is_attachment_reference($dj, $docids)) {
+                ++$this->cost;
+            }
             if (($doc = $di->upload_document($dj))) {
                 $docs[] = $doc;
             } else {
@@ -656,6 +794,16 @@ class Comment_API extends MessageSet {
             }
         }
         return $docs;
+    }
+
+    /** @param list<DocumentInfo> $docs
+     * @return list<int> */
+    static private function document_ids($docs) {
+        $ids = [];
+        foreach ($docs as $doc) {
+            $ids[] = $doc->paperStorageId;
+        }
+        return $ids;
     }
 
     /** Save the comment described by `$req` onto `$xcrow` (an existing comment or
@@ -672,6 +820,18 @@ class Comment_API extends MessageSet {
         if ($whynot) {
             $whynot->set("expand", true)->append_to($this, null, 2);
             return null;
+        }
+
+        // optimistic-concurrency precondition (a fresh skeleton has
+        // timeModified 0, so a new comment never trips this)
+        if ($req["if_unmodified_since"] !== null
+            && $req["if_unmodified_since"] < $xcrow->timeModified) {
+            $this->stale = true;
+        }
+
+        // absent text: empty for a new comment, unchanged for an existing one
+        if ($req["text"] === null) {
+            $req["text"] = $xcrow->commentId ? $xcrow->raw_content() : "";
         }
 
         // import attachments
@@ -694,6 +854,13 @@ class Comment_API extends MessageSet {
             return null;
         }
 
+        // changing comment documents requires document:write scope
+        if (self::document_ids($req["docs"] ?? []) !== $xcrow->attachment_ids()
+            && ($fr = $this->user->perm_scope_allows(TokenScope::S_DOC_WRITE, $this->prow))) {
+            $fr->set("expand", true)->append_to($this, null, 2);
+            return null;
+        }
+
         // check for review token
         $suser = $this->user;
         if ($req["review_token"]
@@ -703,52 +870,68 @@ class Comment_API extends MessageSet {
             $suser = $this->conf->user_by_id($rrow->contactId);
         }
 
-        // save (or, for a dry run, validate the change without committing)
+        // prepare to save
         $cs = new CommentStatus($suser);
         $prepared = $cs->prepare_save($xcrow, $req);
         // a suppression request is honored only for an administrator of the
         // comment's submission
         $cs->set_notify($this->notify || !$cs->can_user_manage());
-        if ($prepared) {
-            $this->change_list = $cs->change_list(true);
+        if ($prepared
+            && ($this->dry_run || $this->dry_run_if_warning)) {
+            $cs->prepare_notification_warnings();
+        }
+        foreach ($cs->message_list() as $mi) {
+            $this->append_item($mi);
+        }
+        if ((($this->dry_run_if_warning && $this->has_problem_since($this->item_message_count))
+             || ($this->dry_run_if_error && $this->has_error_since($this->item_message_count)))
+            && !$this->stale /* for error messages, `stale` should win */) {
+            $this->dry_run_here = true;
         }
 
+        // record changes, execute or abort
+        $this->change_list = $prepared ? $cs->change_list(true) : [];
+        $executed = $prepared
+            && !$this->stale
+            && !$this->dry_run_here
+            && $cs->execute_save();
+        $succeeded = $executed;
+        if (!$succeeded) {
+            if (!$this->stale
+                && !$this->dry_run_here
+                && $xcrow->is_response()
+                && ($rcrow = self::find_response_by_id($this->prow, (int) $xcrow->commentRound))) {
+                // re-entering the same response is not an error (but also
+                // makes no changes). Conflicting edits are errors
+                $this->stale = $rcrow->raw_content() !== $xcrow->raw_content()
+                    || $rcrow->attachment_ids() != $xcrow->attachment_ids();
+                $xcrow = $rcrow;
+                if (!$this->stale) {
+                    $succeeded = true;
+                    $this->change_list = [];
+                }
+            }
+            $cs->abort_save(); // reverts previous `$xcrow`
+        }
+
+        // return if problem or dry-run
         if ($this->stale) {
-            // an edit conflict: report the attempted diff, but do not commit;
-            // `abort_save` reverts the in-memory changes so the response shows
-            // the server's current version
-            $cs->abort_save();
             return $xcrow;
-        }
-
-        if ($this->dry_run) {
-            $cs->abort_save();
+        } else if ($this->dry_run_here) {
             $this->ivalid = $prepared;
             if (!$prepared) {
                 $this->error_at(null, "<0>Error saving comment");
-                return null;
             }
-            return $xcrow;
-        }
-
-        if ($prepared && $cs->execute_save()) {
-            $cs->notify_followers();
-        } else if ($xcrow->is_response()
-                   && ($ocrow = self::find_response_by_id($this->prow, (int) $xcrow->commentRound))) {
-            // re-entering the same response is not an error;
-            // conflict edits are
-            if ($ocrow->comment !== $req["text"]
-                || $ocrow->attachment_ids() != $xcrow->attachment_ids()) {
-                $this->stale = true;
-                return $ocrow;
-            }
-            $xcrow = $ocrow;
-        } else {
+            return $prepared ? $xcrow : null;
+        } else if (!$succeeded) {
             $this->error_at(null, "<0>Error saving comment");
             return null;
         }
 
         // a valid modification was committed
+        if ($executed) {
+            $cs->notify_followers();
+        }
         $this->ivalid = true;
 
         // save success messages
@@ -757,17 +940,21 @@ class Comment_API extends MessageSet {
         $aunames = $mentions = [];
         $mentions_missing = $mentions_censored = false;
         foreach ($xcrow->notifications ?? [] as $n) {
-            if ($n->has(NotificationInfo::CONTACT | NotificationInfo::SENT)) {
+            if ($n->is_all(NotificationInfo::CONTACT | NotificationInfo::SENT)) {
                 $aunames[] = $n->user->name_h(NAME_EB);
             }
-            if ($n->has(NotificationInfo::MENTION)) {
-                if ($n->sent()) {
-                    $mentions[] = $n->user_html ?? $suser->reviewer_html_for($n->user);
+            if ($n->is(NotificationInfo::MENTION)) {
+                if ($n->is(NotificationInfo::SENT | NotificationInfo::PRETEND_SENT)) {
+                    if ($n->text !== null) {
+                        $mentions[] = htmlspecialchars($n->text);
+                    } else {
+                        $mentions[] = $suser->reviewer_html_for($n->user);
+                    }
                 } else if ($xcrow->timeNotified === $xcrow->timeModified) {
                     $mentions_missing = true;
                 }
             }
-            if ($n->has(NotificationInfo::CENSORED)) {
+            if ($n->is(NotificationInfo::CENSORED)) {
                 $mentions_censored = true;
             }
         }
@@ -779,13 +966,13 @@ class Comment_API extends MessageSet {
             }
         }
         if ($mentions) {
-            $this->success($this->conf->_("<5>Notified mentioned users {:nblist}", $mentions));
+            $this->success($this->conf->_("<5>Mentioned users {:nblist}", $mentions));
         }
         if ($mentions_missing) {
             $this->append_item(MessageItem::warning_note($this->conf->_("<0>Some mentioned users cannot currently see this comment, so they were not notified.")));
         }
         if ($mentions_censored) {
-            $this->append_item(MessageItem::warning_note($this->conf->_("<0>Some notifications were censored to anonymize mentioned users.")));
+            $this->append_item(MessageItem::warning_note($this->conf->_("<0>Mentioned names will be anonymized for some readers.")));
         }
         return $xcrow;
     }
@@ -805,7 +992,7 @@ class Comment_API extends MessageSet {
 
     /** Record a per-item resolution failure (no save attempted). */
     private function execute_fail() {
-        $this->status_list[] = new Comment_API_Status($this->message_count());
+        $this->status_list[] = new Comment_API_Status($this->message_count(), $this->dry_run_here);
         $this->comments[] = null;
     }
 
@@ -835,9 +1022,6 @@ class Comment_API extends MessageSet {
             "ok" => $ok,
             "message_list" => $this->message_list()
         ]);
-        if ($this->dry_run) {
-            $jr->content["dry_run"] = true;
-        }
         if ($this->single) {
             // omit `pid`: the URL pins the paper
             foreach ($this->status_list[0]->jsonSerialize() as $k => $v) {
@@ -849,6 +1033,9 @@ class Comment_API extends MessageSet {
                 $jr->content["comment"] = $this->comments[0];
             }
         } else {
+            if ($this->dry_run) { // XXX backward compat, use the ones in `status_list`
+                $jr->content["dry_run"] = true;
+            }
             $jr->content["status_list"] = $this->status_list;
             if (!$this->dry_run) {
                 $jr->content["comments"] = $this->comments;

@@ -78,10 +78,16 @@ class Follow_AssignmentParser extends AssignmentParser {
         return $state->reviewer->contactId > 0 ? [$state->reviewer] : null;
     }
     function allow_user(PaperInfo $prow, Contact $contact, $req, AssignmentState $state) {
-        return $contact->contactId != 0
-            && $contact->can_view_paper($prow)
-            && ($contact->contactId == $state->user->contactId
-                || $state->user->can_manage($prow));
+        if ($contact->contactId !== $state->user->contactId
+            && !$state->user->can_manage($prow)) {
+            $state->paper_error($prow->failure_reason(["administer" => true]));
+            return false;
+        } else if (!$state->user->scope_allows(TokenScope::S_OTH_WRITE, $prow)) {
+            $state->paper_error($prow->failure_reason(["scope" => TokenScope::S_OTH_WRITE]));
+            return false;
+        }
+        return $contact->contactId !== 0
+            && $contact->can_view_paper($prow);
     }
     function apply(PaperInfo $prow, Contact $contact, $req, AssignmentState $state) {
         $fs = $this->follow_state($req, $state);
@@ -152,12 +158,12 @@ class Follow_Assigner extends Assigner {
     function execute(AssignmentSet $aset) {
         if ($this->watch) {
             $aset->stage_qe("insert into PaperWatch set paperId=?, contactId=?, watch=? on duplicate key update watch=(watch&~?)|?",
-                $this->pid, $this->cid, $this->watch,
+                $this->pid, $this->cid(), $this->watch,
                 Contact::WATCH_REVIEW_EXPLICIT | Contact::WATCH_REVIEW, $this->watch);
         } else {
             $aset->stage_qe("update PaperWatch set watch=(watch&~?) where paperId=? and contactId=?",
-                Contact::WATCH_REVIEW_EXPLICIT | Contact::WATCH_REVIEW, $this->pid, $this->cid);
-            $aset->stage_qe("delete from PaperWatch where paperId=? and contactId=? and watch=0", $this->pid, $this->cid);
+                Contact::WATCH_REVIEW_EXPLICIT | Contact::WATCH_REVIEW, $this->pid, $this->cid());
+            $aset->stage_qe("delete from PaperWatch where paperId=? and contactId=? and watch=0", $this->pid, $this->cid());
         }
     }
 }

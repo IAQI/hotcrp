@@ -414,12 +414,13 @@
                 "enum": [
                     "chair",
                     "pc",
+                    "unlistedpc",
                     "sysadmin",
                     "manager",
                     "author",
                     "reviewer"
                 ],
-                "description": "A user’s standing in the conference. `chair` is a conference chair; `pc` is a program committee member (also present for chairs); `sysadmin` is a system administrator; `manager` administers some submissions without being a full chair; `author` is an author or contact of some submission; `reviewer` has been assigned at least one review."
+                "description": "A user’s standing in the conference. `chair` is a conference chair; `pc` is a program committee member (also present for chairs); `unlistedpc` is a program committee member left off PC lists, such as a bot; `sysadmin` is a system administrator; `manager` administers some submissions without being a full chair; `author` is an author or contact of some submission; `reviewer` has been assigned at least one review."
             },
             "potential_conflict": {
                 "type": "object",
@@ -505,6 +506,17 @@
                 "examples": [
                     2,
                     null
+                ]
+            },
+            "dry_run_mode": {
+                "oneOf": [
+                    {"type": "boolean"},
+                    {"type": "string", "enum": ["if_warning", "if_error"]}
+                ],
+                "description": "Boolean, or `if_warning`/`if_error` to make the dry run conditional on warnings or errors",
+                "examples": [
+                    1,
+                    "if_warning"
                 ]
             },
             "pid": {
@@ -1096,6 +1108,10 @@
                     "conflict": {
                         "type": "boolean",
                         "description": "True when this update was rejected by an if_unmodified_since edit-conflict check"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "True for dry-run requests that did not modify the database"
                     }
                 }
             },
@@ -1125,6 +1141,10 @@
                     "conflict": {
                         "type": "boolean",
                         "description": "True when this update was rejected by an if_unmodified_since edit-conflict check"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "True for dry-run requests that did not modify the database"
                     }
                 }
             },
@@ -1152,6 +1172,10 @@
                     "conflict": {
                         "type": "boolean",
                         "description": "True when this update was rejected by an edit-conflict check"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "True for dry-run requests that did not modify the database"
                     }
                 }
             },
@@ -1462,6 +1486,20 @@
                     },
                     "status": {
                         "$ref": "#/components/schemas/paper_status"
+                    },
+                    "overlong": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "const": true
+                        },
+                        "description": "Fields whose text is longer than the field's word limit, whether or not this response truncated them."
+                    },
+                    "truncated": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "enum": ["soft", "hard"]
+                        },
+                        "description": "Fields whose text was truncated in this response. `soft` means the rest is available with `word_limit=hard`; `hard` means the rest is past the field's hard word limit, which HotCRP displays to no one."
                     }
                 }
             },
@@ -1570,12 +1608,32 @@
                     "text": {
                         "type": "string"
                     },
+                    "word_count": {
+                        "type": "integer"
+                    },
+                    "overlong": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "text": {
+                                "const": true
+                            }
+                        },
+                        "description": "Present when the comment's text is longer than its response round's word limit, whether or not this response truncated it."
+                    },
+                    "truncated": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "text": {
+                                "enum": ["soft", "hard"]
+                            }
+                        },
+                        "description": "Present when the text was truncated in this response. `soft` means the rest is available with `word_limit=hard`; `hard` means the rest is past the round's hard word limit, which HotCRP displays to no one."
+                    },
                     "docs": {
                         "type": "array",
                         "items": {}
-                    },
-                    "word_count": {
-                        "type": "integer"
                     }
                 },
                 "description": "Comment representation"
@@ -1592,6 +1650,72 @@
                 "in": "cookie",
                 "name": "hotcrpsession",
                 "description": "Browser sessions authenticate to HotCRP’s API via a cookie. The name of the cookie varies by installation. Operations other than GET and HEAD also require a `post` query parameter for CSRF protection."
+            },
+            "oauth2": {
+                "type": "oauth2",
+                "description": "HotCRP acts as an OAuth 2.0 and OpenID Connect provider for registered client applications. A conference’s authorization endpoint is `/authorize` and its token endpoint is `/api/oauthtoken`; discover them, and the scopes the conference actually offers, from `/.well-known/oauth-authorization-server`.\n\nEvery access token carries a **scope**, which bounds what the token may do independently of what its user may do: a request is refused unless *both* the user has the right and the token’s scope grants it. Scopes are written as a space-separated list. The same scopes apply to the personal API tokens created under Account settings > Developer, so the scope listed on an operation below is what any token needs, however it was obtained.\n\nWithin a resource family, `:write` includes `:read`, and `:admin` includes both — so a `tag:admin` token satisfies an operation that asks for `tag:read`. The aggregate scopes `read`, `write`, and `admin` grant that level across every family, `all` grants everything, and `none` grants no API access at all.\n\nA scope may be narrowed to a subset of submissions by appending a selector: `#12` limits it to submission 12, `#tag` to the submissions carrying that tag, and `?q=SEARCH` to the submissions matching a search. For example, `paper:write#discuss` permits writing only to submissions tagged `#discuss`.",
+                "flows": {
+                    "authorizationCode": {
+                        "authorizationUrl": "../authorize",
+                        "tokenUrl": "api/oauthtoken",
+                        "refreshUrl": "api/oauthtoken",
+                        "scopes": {
+                            "openid": "Authenticate the user and issue an ID token. Grants no API access on its own.",
+                            "email": "Include the user’s email address in the ID token and `userinfo`. Grants no API access on its own.",
+                            "profile": "Include the user’s name and other profile claims in the ID token and `userinfo`. Grants no API access on its own.",
+
+                            "submeta:read": "Read submission metadata: fields, authors, topics, decisions, and status. Does not grant access to document contents.",
+                            "submeta:write": "Read and modify submission metadata.",
+                            "submeta:admin": "Read and modify submission metadata with submission administrator privilege.",
+
+                            "document:read": "Read documents — submission PDFs and attachments — and the submission metadata needed to locate them.",
+                            "document:write": "Read and upload documents, and modify the submissions they belong to.",
+                            "document:admin": "Read and upload documents with document administrator privilege.",
+
+                            "submission:read": "Read submissions and their documents.",
+                            "submission:write": "Read and modify submissions and their documents.",
+                            "submission:admin": "Read and modify submissions and their documents with submission administrator privilege.",
+
+                            "review:read": "Read reviews.",
+                            "review:write": "Read and write reviews, including submitting the caller’s own.",
+                            "review:admin": "Read and write reviews with review administrator privilege, including reviews the caller does not own.",
+
+                            "tag:read": "Read submission tags.",
+                            "tag:write": "Read and change submission tags.",
+                            "tag:admin": "Read and change submission tags with administrator privilege, including twiddle tags belonging to other users.",
+
+                            "comment:read": "Read comments and responses.",
+                            "comment:write": "Read and write comments and responses.",
+                            "comment:admin": "Read and write comments with administrator privilege, including comments the caller does not own.",
+
+                            "preference:read": "Read review preferences.",
+                            "preference:write": "Read and set review preferences.",
+                            "preference:admin": "Read and set review preferences with administrator privilege, including other PC members’ preferences.",
+
+                            "reaction:read": "Read review ratings and other reactions.",
+                            "reaction:write": "Read and record the caller’s own review ratings and other reactions.",
+                            "reaction:admin": "Read and change review ratings and other reactions with administrator privilege, including clearing all ratings on a review.",
+
+                            "other:read": "Read everything not covered by another family: users, search metadata, the meeting tracker, notifications, and session state.",
+                            "other:write": "Read and modify everything not covered by another family.",
+                            "other:admin": "Read and modify everything not covered by another family, with administrator privilege — including modifying accounts other than the caller’s.",
+
+                            "settings:read": "Read site settings.",
+                            "settings:write": "Read site settings. Modifying settings requires `settings:admin`, since any settings change is an administrative act.",
+                            "settings:admin": "Read and modify site settings.",
+
+                            "paper:read": "Read submissions, documents, reviews, tags, comments, preferences, and reactions. Equivalent to `submission:read review:read tag:read comment:read preference:read reaction:read`.",
+                            "paper:write": "Read and write submissions, documents, reviews, tags, comments, preferences, and reactions.",
+                            "paper:admin": "Read and write submissions, documents, reviews, tags, comments, preferences, and reactions with administrator privilege.",
+
+                            "read": "Read access across every family, including settings.",
+                            "write": "Read and write access across every family. Does not grant administrator privilege.",
+                            "admin": "Full access, including administrator privilege. Equivalent to `all`.",
+                            "all": "Full access, including administrator privilege.",
+                            "none": "No API access. Useful with `openid` when an application only needs to identify the user."
+                        }
+                    }
+                }
             }
         }
     },

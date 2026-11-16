@@ -120,6 +120,7 @@ class Review_Page {
 
     function handle_update() {
         $rv = new ReviewValues($this->user);
+        $rv->set_link_message_fields(true);
         if ($rv->parse_qreq($this->qreq)
             && $rv->check_and_save($this->prow, $this->rrow)) {
             $this->qreq->r = $this->qreq->reviewId = $rv->review_ordinal_id;
@@ -132,42 +133,11 @@ class Review_Page {
         $this->reload_prow();
     }
 
-    function handle_upload_form() {
-        if (!$this->qreq->has_file("file")) {
-            $this->conf->error_msg("<0>File upload required");
-            return;
-        }
-        $rv = (new ReviewValues($this->user))
-            ->set_text($this->qreq->file_content("file"), $this->qreq->file_filename("file"));
-        $match = $other = false;
-        $override = friendly_boolean($this->qreq->override) ?? false;
-        while ($rv->set_req_override($override)->parse_text()) {
-            if ($rv->req_pid() === $this->prow->paperId) {
-                $match = true;
-                if ($rv->check_and_save($this->prow, $this->rrow)) {
-                    $this->qreq->r = $this->qreq->reviewId = $rv->review_ordinal_id;
-                }
-            } else {
-                $other = true;
-            }
-            $rv->clear_req();
-        }
-        if (!$match && !$other) {
-            $rv->error_at(null, "<0>Uploaded file had no valid review forms");
-        } else if (!$match) {
-            $rv->error_at(null, "<0>Uploaded form was not for this {submission}");
-        } else if ($other) {
-            $rv->warning_at(null, "<0>Reviews for other {submissions} ignored");
-            $rv->inform_at(null, "<5>Upload multiple-review files " . $this->conf->hotlink("here", "offline") . ".");
-        }
-        $rv->report();
-        if (!$rv->has_error()) {
-            $this->qreq->redirect_self();
-        }
-        $this->reload_prow();
-    }
-
     function handle_download_form() {
+        if ($this->rrow === null
+            && ($fr = $this->user->perm_view_blank_review_form($this->prow))) {
+            $this->error_exit($fr);
+        }
         $filename = "review-" . ($this->rrow ? $this->rrow->unparse_ordinal_id() : $this->prow->paperId);
         $rf = $this->conf->review_form();
         $this->conf->make_text_downloader($filename)
@@ -219,6 +189,7 @@ class Review_Page {
         }
 
         $rv = new ReviewValues($this->user);
+        $rv->set_link_message_fields(true);
         $my_rrow = $this->prow->review_by_user($this->user);
         $want_rid = $this->rrow->unparse_ordinal_id();
         if ($rv->parse_qreq($this->qreq)
@@ -278,8 +249,6 @@ class Review_Page {
             $this->handle_update();
         } else if ($qreq->adoptreview) {
             $this->handle_adopt();
-        } else if ($qreq->upload) {
-            $this->handle_upload_form();
         } else if ($qreq->unsubmitreview) {
             $this->handle_unsubmit();
         } else if ($qreq->deletereview) {
@@ -289,10 +258,9 @@ class Review_Page {
 
     /** @return ?int */
     function current_capability_rrid() {
-        if (($capuid = $this->user->reviewer_capability($this->prow))) {
-            $u = $this->conf->user_by_id($capuid, USER_SLICE);
-            $rrow = $this->prow->review_by_user($capuid);
-            $refs = $u ? $this->prow->review_refusals_by_user($u) : [];
+        if (($capu = $this->user->reviewer_capability_user($this->prow))) {
+            $rrow = $this->prow->review_by_user($capu->contactId);
+            $refs = $this->prow->review_refusals_by_user($capu);
             if ($rrow && (!$this->rrow || $this->rrow === $rrow)) {
                 return $rrow->reviewId;
             } else if (!$rrow && !empty($refs) && $refs[0]->refusedReviewId > 0) {
@@ -302,8 +270,8 @@ class Review_Page {
         return null;
     }
 
-    function add_capability_user_message($capuid) {
-        if (($u = $this->conf->user_by_id($capuid, USER_SLICE))) {
+    function add_capability_user_message() {
+        if (($u = $this->user->reviewer_capability_user($this->prow))) {
             if (PaperRequest::simple_qreq($this->qreq)
                 && ($i = Contact::session_index_by_email($this->qreq, $u->email)) >= 0) {
                 $selfurl = $this->conf->selfurl($this->qreq, null, Conf::HOTURL_SITEREL);
@@ -335,6 +303,14 @@ class Review_Page {
             } else {
                 $m = "<5>You’re accessing this review using a special link for reviewer {$hemail}. " . $this->conf->hotlink("Sign in to the site", "signin", ["email" => $u->email, "cap" => null], ["class" => "nw"]);
             }
+            $this->pt()->add_pre_status_feedback(MessageItem::warning_note($m));
+
+            if ($u->can_view_submitted_review($this->prow)
+                && !$this->user->can_view_submitted_review($this->prow)) {
+                $this->pt()->add_pre_status_feedback(MessageItem::warning_note("<0>More review information may become visible when you sign in as {$u->email}."));
+            }
+        } else {
+            $m = $this->conf->_("<0>Your reviewer link is no longer active");
             $this->pt()->add_pre_status_feedback(MessageItem::warning_note($m));
         }
     }
@@ -382,11 +358,7 @@ class Review_Page {
             $qreq->m = $qreq->mode;
         }
         if ($qreq->post && $qreq->default) {
-            if ($qreq->has_file("file")) {
-                $qreq->upload = 1;
-            } else {
-                $qreq->update = 1;
-            }
+            $qreq->update = 1;
         }
         if ($user->is_reviewer()) {
             $qreq->open_session();
@@ -394,9 +366,6 @@ class Review_Page {
 
         $pp = new Review_Page($user, $qreq);
         $pp->load_prow();
-
-        // fix user
-        $capuid = $user->reviewer_capability($pp->prow);
 
         // action
         if ($qreq->cancel) {
@@ -410,11 +379,12 @@ class Review_Page {
         }
 
         // capability may accept to different user
+        $capuid = $user->reviewer_capability($pp->prow);
         if ($capuid
             && $pp->rrow
             && $capuid === $pp->rrow->contactId
             && $capuid !== $user->contactXid) {
-            $pp->add_capability_user_message($capuid);
+            $pp->add_capability_user_message();
         }
 
         $pp->print();

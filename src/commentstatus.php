@@ -31,10 +31,11 @@ final class CommentStatus extends MessageSet {
     private $_desired_mentions = [];
 
     const SSF_PREPARED = 1;
-    const SSF_SAVED = 2;
-    const SSF_ABORTED = 4;
-    const SSF_DELETE = 8;
-    const SSF_CREATE = 16;
+    const SSF_SAVE_ATTEMPTED = 2;
+    const SSF_SAVED = 4;
+    const SSF_ABORTED = 8;
+    const SSF_DELETE = 16;
+    const SSF_CREATE = 32;
 
     function __construct(Contact $viewer) {
         $this->conf = $viewer->conf;
@@ -122,6 +123,10 @@ final class CommentStatus extends MessageSet {
             if ($crow->commentId === 0) {
                 return false;
             }
+            // delete comment contents so callers see changes
+            $crow->set_prop("comment", "");
+            $crow->set_prop("commentOverflow", null);
+            $crow->set_attachments([]);
             return true;
         }
 
@@ -134,6 +139,16 @@ final class CommentStatus extends MessageSet {
         $ctype = $crow->requested_type($req) & CommentInfo::CT_DBMASK;
         $is_response = ($ctype & CommentInfo::CT_RESPONSE) !== 0;
 
+        // bot provenance
+        if ($user->is_acting_bot()) {
+            $ctype |= CommentInfo::CT_BOT;
+        } else {
+            $ctype &= ~CommentInfo::CT_BOT;
+        }
+        if (($old_ctype & CommentInfo::CTM_BOT) !== 0) {
+            $ctype |= CommentInfo::CT_BOT_PREVIOUS;
+        }
+
         // tags
         if (!$is_response
             && isset($req["tags"])
@@ -142,7 +157,7 @@ final class CommentStatus extends MessageSet {
             $ts = [];
             foreach (preg_split('/\s++/', $req["tags"]) as $tt) {
                 if ($tt !== ""
-                    && ($tt = $tagger->check($tt))) {
+                    && ($tt = $tagger->check_syntax($tt))) {
                     list($tag, $value) = Tagger::unpack($tt);
                     $ltag = strtolower($tag);
                     if (!str_ends_with($ltag, "response")) {
@@ -175,46 +190,100 @@ final class CommentStatus extends MessageSet {
         $this->_desired_mentions = $desired_mentions;
         $crow->set_data_prop("mentions", empty($desired_mentions) ? null : $desired_mentions);
 
-        // more properties
-        if (!$crow->commentId) {
-            $crow->_old_prop["contactId"] = null;
-            $crow->set_prop("contactId", $user->contactId);
-            $crow->_old_prop["paperId"] = null;
-            $crow->_old_prop["replyTo"] = null;
-            $crow->_old_prop["commentRound"] = null;
-            $crow->_old_prop["commentType"] = null;
-        }
         // timeDisplayed, timeNotified
         if ($crow->timeModified >= Conf::$now) {
             Conf::advance_current_time($crow->timeModified);
         }
-        if ($displayed) {
-            if ($crow->timeNotified + 10800 < Conf::$now
-                || (($ctype & CommentInfo::CT_RESPONSE) !== 0
-                    && ($ctype & CommentInfo::CT_DRAFT) === 0
-                    && ($old_ctype & CommentInfo::CT_DRAFT) !== 0)) {
-                $crow->set_prop("timeNotified", Conf::$now);
-            }
-            // reset timeDisplayed if you change the comment type
-            if ((!$crow->timeDisplayed || $crow->ordinal_missing())
-                && ($text !== "" || $docs)) {
-                $crow->set_prop("timeDisplayed", Conf::$now);
-            }
+        // notify for displayed comments and draft responses at most every
+        // 3 hours, and whenever a response is submitted
+        if (($displayed || $is_response)
+            && ($crow->timeNotified + 10800 < Conf::$now
+                || ($is_response
+                    && $displayed
+                    && ($old_ctype & CommentInfo::CT_DRAFT) !== 0))) {
+            $crow->set_prop("timeNotified", Conf::$now);
+        }
+        // reset timeDisplayed if you change the comment type
+        if ($displayed
+            && (!$crow->timeDisplayed || $crow->ordinal_missing())
+            && ($text !== "" || $docs)) {
+            $crow->set_prop("timeDisplayed", Conf::$now);
+        }
+
+        // ensure _old_prop entries for new comments
+        if (!$crow->commentId) {
+            $crow->set_prop("contactId", $user->contactId);
+            $crow->_old_prop["contactId"] = $crow->contactId;
+            $crow->_old_prop["paperId"] = $crow->paperId;
+            $crow->_old_prop["replyTo"] = $crow->replyTo;
+            $crow->_old_prop["commentRound"] = $crow->commentRound;
+            $crow->_old_prop["commentType"] = $crow->commentType;
         }
 
         $this->_has_change = $crow->prop_changed() || $crow->docs_changed();
         return true;
     }
 
+    /** Warn about mentions that a commit would fail to notify. The guards match
+     * `notify_followers`, which informs mentions only for a notifying, non-draft,
+     * non-delete save. */
+    function prepare_notification_warnings() {
+        if (!$this->notify
+            || !$this->_has_change
+            || !$this->_displayed
+            || $this->is_delete()
+            || !$this->crow) {
+            return;
+        }
+        foreach ($this->_desired_mentions as $mxm) {
+            $this->conf->prefetch_user_by_id($mxm->user->contactId);
+        }
+        $crow = $this->crow;
+        foreach ($this->_desired_mentions as $mxm) {
+            if (($mentionee = $mxm->user($this->conf, USER_SLICE))
+                && !$mentionee->is_dormant()
+                && !$mentionee->can_view_comment($crow->prow, $crow)
+                && $mxm->is_notification_viewable($this->viewer, $crow)) {
+                $field = ($crow->commentType & CommentInfo::CT_TOPIC_PAPER) === 0 ? "topic" : null;
+                $this->warning_at($field, "<0>Some mentioned users cannot see this comment now");
+                if ($field) {
+                    $this->inform_at($field, "<0>Should the comment be on the submission thread instead?");
+                }
+                break;
+            }
+        }
+        // Warn on a salutation addressed to the authors (`Dear authors`,
+        // `Hi authors`, `@authors`, `Authors:`). Third-person prose about
+        // `the authors`, and salutations to colleagues, must not match.
+        if ($this->crow->commentId <= 0
+            && $this->crow->commentType < CommentInfo::CTVIS_AUTHOR
+            && ($this->crow->commentType & CommentInfo::CTM_BYAUTHOR) === 0
+            && preg_match('/\A\s*+(?:\#{1,6}[^\n]{0,60}\n|\[[^\]\n]{1,30}\])?[\s#*"\'`\x80-\xff]{0,8}(?:'
+                . '(?:(?:hel+o|hi|hey|greetings)[!,]*+\s*+)?dears?\s*+(?:the\s++)?\**+@?+auth[oe]rs?+\b'
+                . '|dears?\s++(?:[a-z][^\s,]{0,20}\s++){1,3}(?:co-)?auth[oe]rs?+\s*+[,:!\n]'
+                . '|(?:hel+o|hi|hey|greetings)!*+(?:\s++\**+@?+auth[oe]rs?+\b'
+                . '|\s*+,\s*+\**+@?+auth[oe]rs?+[ \t]*+(?:[-,.:;!?]|\n))'
+                . '|(?:thanks?|thank\s++you|congratulations|congrats)\s*+,\s*+@?+auth[oe]rs?+\b'
+                . '|@\s*+auth[oe]rs?+\b'
+                . '|comments?\s++(?:for|to)\s++(?:the\s++)?auth[oe]rs?+\**+[ \t]*+[:.\n]'
+                . '|to\s++(?:the\s++)?auth[oe]rs?+\s*+[,:]'
+                . '|auth[oe]rs?+\s*+(?:[,:;]|-{1,2}(?!\w)|—|–))/i', $this->crow->raw_content())) {
+            $this->warning_at("visibility", "<0>This comment appears to be intended for authors, but it’s not visible to authors");
+        }
+    }
 
     /** Commit the staged changes to the database.
      * @return bool */
     function execute_save() {
-        if (($this->_status & (self::SSF_PREPARED | self::SSF_SAVED | self::SSF_ABORTED)) !== self::SSF_PREPARED) {
+        if (($this->_status & (self::SSF_PREPARED | self::SSF_SAVE_ATTEMPTED | self::SSF_SAVED | self::SSF_ABORTED)) !== self::SSF_PREPARED) {
             throw new ErrorException("CommentStatus::execute_save called inappropriately");
         }
+        $this->_status |= self::SSF_SAVE_ATTEMPTED;
+        if ($this->is_delete() ? !$this->_commit_delete() : !$this->_commit()) {
+            return false;
+        }
         $this->_status |= self::SSF_SAVED;
-        return $this->is_delete() ? $this->_commit_delete() : $this->_commit();
+        return true;
     }
 
     /** @return bool */
@@ -243,12 +312,13 @@ final class CommentStatus extends MessageSet {
     private function _log_save() {
         $crow = $this->crow;
         $ctype = $crow->commentType;
+        $creating = ($this->_status & self::SSF_CREATE) !== 0;
         $log = $crow->logid();
         if (($ctype & CommentInfo::CT_DRAFT) === 0
-            && (!$crow->commentId || ($ctype & CommentInfo::CT_DRAFT) !== 0)) {
+            && ($creating || ($crow->base_prop("commentType") & CommentInfo::CT_DRAFT) !== 0)) {
             $log .= " submitted";
         } else {
-            $log .= $crow->commentId ? " edited" : " started";
+            $log .= $creating ? " started" : " edited";
             if (($ctype & CommentInfo::CT_DRAFT) !== 0) {
                 $log .= " draft";
             }

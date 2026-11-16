@@ -6,20 +6,22 @@ class Mention_Tester {
     /** @var Conf
      * @readonly */
     public $conf;
-    /** @var array<int,Contact> */
+    /** @var list<MentionPhrase> */
     public $pc;
 
     function __construct(Conf $conf) {
         $this->conf = $conf;
-        $this->pc = $conf->pc_members();
+        foreach ($conf->pc_members() as $u) {
+            $this->pc[] = new MentionPhrase($u, MentionPhrase::TF_NAMED);
+        }
     }
 
     /** @param string $s
-     * @param array<Contact|Author> ...$user_lists
+     * @param list<MentionPhrase> ...$user_lists
      * @return list<MentionPhrase> */
     function parse_mentions($s, ...$user_lists) {
         if (empty($user_lists)) {
-            $user_lists = [$this->pc];
+            $user_lists[] = $this->pc;
         }
         return MentionParser::parse($s, ...$user_lists);
     }
@@ -115,7 +117,8 @@ class Mention_Tester {
 
     function test_priorities() {
         $user_pdanzig = $this->conf->pc_member_by_email("PETER.DANZIG@usc.edu");
-        $mpxs = $this->parse_mentions("a @Peter Danzig b @Peter c @Peter Druschel d", [$user_pdanzig], $this->pc);
+        $mxm_pdanzig = new MentionPhrase($user_pdanzig, MentionPhrase::TF_NAMED);
+        $mpxs = $this->parse_mentions("a @Peter Danzig b @Peter c @Peter Druschel d", [$mxm_pdanzig], $this->pc);
         xassert_eqq(count($mpxs), 3);
         xassert_eqq($mpxs[0]->user->email, "peter.danzig@usc.edu");
         xassert_eqq($mpxs[0]->pos1, 2);
@@ -128,7 +131,8 @@ class Mention_Tester {
         xassert_eqq($mpxs[2]->pos2, 42);
 
         $user_pdruschel = $this->conf->pc_member_by_email("pdruschel@cs.rice.edu");
-        $mpxs = $this->parse_mentions("A @PETER DANZIG B @PETER C @PETER DRUSCHEL D", [$user_pdruschel], $this->pc);
+        $mxm_pdruschel = new MentionPhrase($user_pdruschel, MentionPhrase::TF_NAMED);
+        $mpxs = $this->parse_mentions("A @PETER DANZIG B @PETER C @PETER DRUSCHEL D", [$mxm_pdruschel], $this->pc);
         xassert_eqq(count($mpxs), 3);
         xassert_eqq($mpxs[0]->user->email, "peter.danzig@usc.edu");
         xassert_eqq($mpxs[0]->pos1, 2);
@@ -143,13 +147,14 @@ class Mention_Tester {
 
     function test_name_email_prefix() {
         $user_jon = $this->conf->pc_member_by_email("jon@cs.ucl.ac.uk");
-        $mpxs = $this->parse_mentions("@Jon Crowcroft fun", [$user_jon], $this->pc);
+        $mxm_jon = new MentionPhrase($user_jon, MentionPhrase::TF_NAMED);
+        $mpxs = $this->parse_mentions("@Jon Crowcroft fun", [$mxm_jon], $this->pc);
         xassert_eqq(count($mpxs), 1);
         xassert_eqq($mpxs[0]->user->email, "jon@cs.ucl.ac.uk");
         xassert_eqq($mpxs[0]->pos1, 0);
         xassert_eqq($mpxs[0]->pos2, 14);
 
-        $mpxs = $this->parse_mentions("@pdruschel HELLO", [$user_jon], $this->pc);
+        $mpxs = $this->parse_mentions("@pdruschel HELLO", [$mxm_jon], $this->pc);
         xassert_eqq(count($mpxs), 1);
         xassert_eqq($mpxs[0]->user->email, "pdruschel@cs.rice.edu");
         xassert_eqq($mpxs[0]->pos1, 0);
@@ -176,6 +181,33 @@ class Mention_Tester {
         }
     }
 
+    function test_mentioncompletion_for_author_without_comment_rights() {
+        // an author who can't start comments may still write a response, so
+        // completion offers the paper's names (co-authors), not the whole PC
+        $conf = $this->conf;
+        $old_cmt_author = $conf->setting("cmt_author");
+        $conf->save_refresh_setting("cmt_author", null);
+        $prow = $conf->checked_paper_by_id(2);
+        $au = $conf->checked_user_by_email("micke@cdt.luth.se");
+        xassert(!$au->isPC && $prow->has_author($au));
+        xassert_eqq($au->new_comment_flags($prow), 0);
+        $names = $this->mention_names($au, $prow);
+        $coauthors = 0;
+        foreach ($prow->author_list() as $a) {
+            if (strcasecmp($a->email, $au->email) !== 0
+                && in_array(Text::name($a->firstName, $a->lastName, $a->email, NAME_P), $names, true)) {
+                ++$coauthors;
+            }
+        }
+        xassert_gt($coauthors, 0);
+        foreach ($conf->pc_members() as $pc) {
+            if (!$prow->has_author($pc)) {
+                xassert_not_in_eqq($pc->name(NAME_P), $names);
+            }
+        }
+        $conf->save_refresh_setting("cmt_author", $old_cmt_author);
+    }
+
     /** @param int $ctype
      * @return int */
     private function add_shepherd_comment($ctype) {
@@ -188,6 +220,11 @@ class Mention_Tester {
 
     function test_mentioncompletion_gates_shepherd_existence() {
         $conf = $this->conf;
+        // let the author comment as well as respond
+        $old_cmt_author = $conf->setting("cmt_author");
+        $old_cmt_always = $conf->setting("cmt_always");
+        $conf->save_refresh_setting("cmt_author", 2);
+        $conf->save_refresh_setting("cmt_always", 1);
         $chair = $conf->checked_user_by_email("chair@_.com");
         $shepherd = $conf->checked_user_by_email("estrin@usc.edu");
         xassert_assign($chair, "paper,action,user\n13,shepherd,{$shepherd->email}\n");
@@ -229,5 +266,7 @@ class Mention_Tester {
         $conf->save_refresh_setting("au_seedec", null);
         xassert_assign($chair, "paper,action,decision\n13,cleardecision,yes\n");
         xassert_assign($chair, "paper,action,user\n13,clearshepherd,{$shepherd->email}\n");
+        $conf->save_refresh_setting("cmt_author", $old_cmt_author);
+        $conf->save_refresh_setting("cmt_always", $old_cmt_always);
     }
 }

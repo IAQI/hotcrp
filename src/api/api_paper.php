@@ -4,6 +4,8 @@
 
 class Paper_API_Status implements JsonSerializable {
     /** @var bool */
+    public $dry_run;
+    /** @var bool */
     public $valid;
     /** @var list<string> */
     public $change_list;
@@ -12,7 +14,10 @@ class Paper_API_Status implements JsonSerializable {
     /** @var null|int|'new' */
     public $pid;
 
-    function __construct($valid = false, $change_list = [], $conflict = false, $pid = null) {
+    /** @param bool $dry_run
+     * @param bool $valid */
+    function __construct($dry_run, $valid = false, $change_list = [], $conflict = false, $pid = null) {
+        $this->dry_run = $dry_run;
         $this->valid = $valid;
         $this->change_list = $change_list;
         $this->conflict = $conflict;
@@ -28,6 +33,9 @@ class Paper_API_Status implements JsonSerializable {
         if ($this->pid !== null) {
             $u["pid"] = $this->pid;
         }
+        if ($this->dry_run) {
+            $u["dry_run"] = true;
+        }
         return $u;
     }
 }
@@ -39,8 +47,18 @@ class Paper_API extends MessageSet {
     /** @var Contact
      * @readonly */
     public $user;
+    /** @var PaperExport */
+    private $pex;
     /** @var bool */
     private $dry_run = false;
+    /** @var bool */
+    private $dry_run_if_warning = false;
+    /** @var bool */
+    private $dry_run_if_error = false;
+    /** @var bool */
+    private $dry_run_here = false;
+    /** @var bool */
+    private $ignore_unwritable_fields = false;
     /** @var bool */
     private $notify = true;
     /** @var bool */
@@ -69,17 +87,25 @@ class Paper_API extends MessageSet {
     const PIDFLAG_IGNORE_PID = 1;
     const PIDFLAG_MATCH_TITLE = 2;
 
-    function __construct(Contact $user) {
+    function __construct(Contact $user, Qrequest $qreq) {
         $this->conf = $user->conf;
         $this->user = $user;
+        $this->pex = new PaperExport($user);
+        if (isset($qreq->word_limit)) {
+            if ($qreq->word_limit === "hard") {
+                $this->pex->set_ignore_soft_word_limits(true);
+            } else if ($qreq->word_limit !== "soft") {
+                JsonResult::make_parameter_error("word_limit")->complete();
+            }
+        }
     }
 
     /** @return JsonResult */
-    static private function run_get_one(Contact $user, Qrequest $qreq, PaperInfo $prow) {
-        $pj = (new PaperExport($user))->paper_json($prow);
+    private function run_get_one(Qrequest $qreq, PaperInfo $prow) {
+        $pj = $this->pex->paper_json($prow);
         assert(!!$pj);
         if (friendly_boolean($qreq->download)) {
-            return APIHelpers::make_json_download($user->conf, $pj, "paper{$prow->paperId}");
+            return APIHelpers::make_json_download($this->conf, $pj, "paper{$prow->paperId}");
         }
         return new JsonResult(["ok" => true, "paper" => $pj]);
     }
@@ -87,7 +113,10 @@ class Paper_API extends MessageSet {
     /** @param array<string,mixed> $args
      * @return array{PaperSearch,PaperInfoSet} */
     static function make_search(Contact $user, Qrequest $qreq, $args = []) {
-        $qreq->t = $qreq->t ?? "viewable";
+        if (!isset($qreq->t)) {
+            $qreq->t = "viewable";
+            $qreq->tsoft = $qreq->tsoft ?? "1";
+        }
         $srch = new PaperSearch($user, $qreq);
         if (friendly_boolean($qreq->warn_missing)) {
             $srch->set_warn_missing(true);
@@ -101,21 +130,20 @@ class Paper_API extends MessageSet {
     }
 
     /** @return JsonResult */
-    static private function run_get_multi(Contact $user, Qrequest $qreq) {
+    private function run_get_multi(Qrequest $qreq) {
         if (!isset($qreq->q)) {
             return JsonResult::make_missing_error("q");
         }
-        list($srch, $prows) = self::make_search($user, $qreq);
 
-        $pex = new PaperExport($user);
+        list($srch, $prows) = self::make_search($this->user, $qreq);
         $pjs = [];
         foreach ($prows as $prow) {
-            if (($pj = $pex->paper_json($prow)))
+            if (($pj = $this->pex->paper_json($prow)))
                 $pjs[] = $pj;
         }
 
         if (friendly_boolean($qreq->download)) {
-            return APIHelpers::make_json_download($user->conf, $pjs, "papers");
+            return APIHelpers::make_json_download($this->conf, $pjs, "papers");
         }
         return new JsonResult([
             "ok" => true,
@@ -142,7 +170,10 @@ class Paper_API extends MessageSet {
 
         // set parameters
         $this->set_post_param($qreq);
-        $this->docloc = new DocumentLocator;
+        if (!isset($qreq->word_limit)) {
+            $this->pex->set_ignore_soft_word_limits(true);
+        }
+        $this->docloc = new DocumentLocator($this->conf);
 
         // check Content-Type
         if (Mimetype::is_form($qreq->body_content_type() ?? Mimetype::FORM_DATA_TYPE)
@@ -167,12 +198,27 @@ class Paper_API extends MessageSet {
     }
 
     private function set_post_param(Qrequest $qreq) {
-        $this->dry_run = friendly_boolean($qreq->dry_run) ?? false;
+        if (isset($qreq->dry_run)) {
+            if ($qreq->dry_run === "if_warning") {
+                $this->dry_run_if_warning = true;
+            } else if ($qreq->dry_run === "if_error") {
+                $this->dry_run_if_error = true;
+            } else if (($dr = friendly_boolean($qreq->dry_run)) !== null) {
+                $this->dry_run = $dr;
+            } else {
+                JsonResult::make_parameter_error("dry_run")->complete();
+            }
+        }
+        $this->dry_run_here = $this->dry_run;
+        $this->ignore_unwritable_fields = friendly_boolean($qreq->ignore_unwritable_fields) ?? false;
         if ($this->user->privChair) {
             if (friendly_boolean($qreq->disable_users)) {
                 $this->disable_users = true;
             }
             if (friendly_boolean($qreq->add_topics)) {
+                if (!$this->user->scope_allows(TokenScope::S_SETTINGS_ADMIN)) {
+                    JsonResult::make_scope_error($qreq, TokenScope::S_SETTINGS_ADMIN, "<0>The `add_topics` parameter requires scope `settings:admin`")->complete();
+                }
                 $this->conf->topic_set()->set_auto_add(true);
                 $this->conf->options()->refresh_topics();
             }
@@ -181,7 +227,7 @@ class Paper_API extends MessageSet {
         // honored is decided per paper (execute_save())
         $this->notify = friendly_boolean($qreq->notify) !== false;
         $this->notify_authors = friendly_boolean($qreq->notify_authors) !== false;
-        $this->notify_reason = $qreq->reason ?? "";
+        $this->notify_reason = convert_to_utf8($qreq->reason ?? "");
         // parse single-paper precondition
         if (isset($qreq->if_unmodified_since)) {
             $t = self::parse_if_unmodified_since($qreq->if_unmodified_since, $this->conf);
@@ -331,6 +377,7 @@ class Paper_API extends MessageSet {
     /** @return PaperStatus */
     private function paper_status() {
         return (new PaperStatus($this->user))
+            ->set_ignore_unwritable_fields($this->ignore_unwritable_fields)
             ->set_disable_users($this->disable_users)
             ->set_notify_reason($this->notify_reason)
             ->set_any_content_file(true)
@@ -347,10 +394,19 @@ class Paper_API extends MessageSet {
         $manage = $ps->can_user_manage();
         $ps->set_notify($this->notify || !$manage)
             ->set_notify_authors($this->notify_authors || !$manage);
-        if ($ok && !$this->dry_run) {
+
+        // adjust dry run status
+        $this->dry_run_here = $this->dry_run;
+        if ((($this->dry_run_if_warning && $ps->has_problem())
+             || ($this->dry_run_if_error && $ps->has_error()))
+            && !$ps->has_error_at("if_unmodified_since")) {
+            $this->dry_run_here = true;
+        }
+
+        if ($ok && !$this->dry_run_here) {
             $ok = $ps->execute_save();
         } else {
-            $ps->abort_save();
+            $ps->abort_save($this->dry_run_here);
         }
         foreach ($ps->message_list() as $mi) {
             if ($mi->field
@@ -363,18 +419,17 @@ class Paper_API extends MessageSet {
             }
             $this->append_item($mi);
         }
-        if ($ok && !$this->dry_run) {
+        if ($ok && !$this->dry_run_here) {
             if ($ps->has_change()) {
                 $this->execute_change($ps);
             }
-            $this->papers[] = (new PaperExport($this->user))
-                ->paper_json($ps->saved_prow());
+            $this->papers[] = $this->pex->paper_json($ps->saved_prow());
             ++$this->npapers;
         } else {
             $this->papers[] = null;
         }
         $this->status_list[] = new Paper_API_Status(
-            $ok, $ps->change_list(true),
+            $this->dry_run_here, $ok, $ps->change_list(true),
             $ps->has_error_at("if_unmodified_since"),
             $ps->saved_pid() ?? "new"
         );
@@ -389,7 +444,7 @@ class Paper_API extends MessageSet {
     }
 
     private function execute_fail() {
-        $this->status_list[] = new Paper_API_Status;
+        $this->status_list[] = new Paper_API_Status($this->dry_run_here);
         $this->papers[] = null;
     }
 
@@ -401,9 +456,6 @@ class Paper_API extends MessageSet {
             "ok" => $ok,
             "message_list" => $this->message_list()
         ]);
-        if ($this->dry_run) {
-            $jr->content["dry_run"] = true;
-        }
         if ($this->single) {
             foreach ($this->status_list[0]->jsonSerialize() as $k => $v) {
                 $jr->content[$k] = $v;
@@ -412,6 +464,9 @@ class Paper_API extends MessageSet {
                 $jr->content["paper"] = $this->papers[0];
             }
         } else {
+            if ($this->dry_run) { // XXX backward compat, use the ones in `status_list`
+                $jr->content["dry_run"] = true;
+            }
             $jr->content["status_list"] = $this->status_list;
             if (!$this->dry_run) {
                 $jr->content["papers"] = $this->papers;
@@ -486,7 +541,8 @@ class Paper_API extends MessageSet {
         $this->set_post_param($qreq);
         $this->single = true;
 
-        if (!$this->user->can_manage($prow)) {
+        if (!$this->user->can_manage($prow)
+            || !$this->user->scope_allows(TokenScope::S_PAPER_ADMIN, $prow)) {
             return JsonResult::make_permission_error(null, "<0>Only administrators can permanently delete {$this->conf->snouns[1]}");
         }
 
@@ -495,7 +551,7 @@ class Paper_API extends MessageSet {
         if ($conflict) {
             $this->error_at("if_unmodified_since", $this->conf->_("<5><strong>Edit conflict</strong>: The {submission} has changed"));
             $valid = false;
-        } else if ($this->dry_run) {
+        } else if ($this->dry_run_here) {
             $valid = true;
         } else {
             if ($this->notify && $this->notify_authors) {
@@ -506,7 +562,7 @@ class Paper_API extends MessageSet {
             }
             $valid = $prow->delete_from_database($this->user);
         }
-        $this->status_list[] = new Paper_API_Status($valid, ["delete"], $conflict, $prow->paperId);
+        $this->status_list[] = new Paper_API_Status($this->dry_run_here, $valid, ["delete"], $conflict, $prow->paperId);
         $this->papers[] = null;
         return $this->post_result();
     }
@@ -519,16 +575,17 @@ class Paper_API extends MessageSet {
             $user->add_overrides(Contact::OVERRIDE_CONFLICT);
         }
         try {
+            $papi = new Paper_API($user, $qreq);
             if ($qreq->is_getlike()) {
                 if ($mode === DocumentLocator::M_ONE) {
-                    $jr = self::run_get_one($user, $qreq, $prow);
+                    $jr = $papi->run_get_one($qreq, $prow);
                 } else {
-                    $jr = self::run_get_multi($user, $qreq);
+                    $jr = $papi->run_get_multi($qreq);
                 }
             } else if ($qreq->method() === "DELETE") {
-                $jr = (new Paper_API($user))->run_delete($qreq, $prow);
+                $jr = $papi->run_delete($qreq, $prow);
             } else {
-                $jr = (new Paper_API($user))->run_post($qreq, $prow, $mode);
+                $jr = $papi->run_post($qreq, $prow, $mode);
             }
         } catch (JsonCompletion $jc) {
             $jr = $jc->result;

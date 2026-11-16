@@ -24,6 +24,8 @@ class Review_API_Status implements JsonSerializable {
     /** @var int */
     public $message_count;
     /** @var bool */
+    public $dry_run;
+    /** @var bool */
     public $valid;
     /** @var list<string> */
     public $change_list;
@@ -35,14 +37,16 @@ class Review_API_Status implements JsonSerializable {
     public $rid;
 
     /** @param int $message_count
+     * @param bool $dry_run
      * @param bool $valid
      * @param list<string> $change_list
      * @param bool $conflict
      * @param ?int $pid
      * @param ?string $rid */
-    function __construct($message_count, $valid = false, $change_list = [],
+    function __construct($message_count, $dry_run, $valid = false, $change_list = [],
                          $conflict = false, $pid = null, $rid = null) {
         $this->message_count = $message_count;
+        $this->dry_run = $dry_run;
         $this->valid = $valid;
         $this->change_list = $change_list;
         $this->conflict = $conflict;
@@ -62,6 +66,9 @@ class Review_API_Status implements JsonSerializable {
         if ($this->rid !== null) {
             $u["rid"] = $this->rid;
         }
+        if ($this->dry_run) {
+            $u["dry_run"] = true;
+        }
         return $u;
     }
 }
@@ -73,10 +80,17 @@ class Review_API extends MessageSet {
     /** @var Contact
      * @readonly */
     public $user;
+    /** @var int
+     * @readonly */
+    public $mode;
 
     // request-global configuration
     /** @var bool */
     private $dry_run = false;
+    /** @var bool */
+    private $dry_run_if_warning = false;
+    /** @var bool */
+    private $dry_run_if_error = false;
     /** @var bool */
     private $notify = true;
     /** @var bool */
@@ -95,6 +109,8 @@ class Review_API extends MessageSet {
     private $qreq_reviewer;
     /** @var bool */
     private $qreq_reviewer_none = false;
+    /** @var bool */
+    private $link_fields = false;
 
     // per-item accumulators (mirror Comment_API/Paper_API)
     /** @var list<Review_API_Status> */
@@ -107,6 +123,8 @@ class Review_API extends MessageSet {
     // current-item working state (reset per item)
     /** @var PaperInfo */
     private $prow;
+    /** @var bool */
+    private $dry_run_here = false;
     /** @var int */
     private $status = 200;
     /** @var bool */
@@ -117,9 +135,11 @@ class Review_API extends MessageSet {
     private $change_list;
 
 
-    function __construct(Contact $user) {
+    /** @param 1|2|4 $mode */
+    function __construct(Contact $user, $mode) {
         $this->conf = $user->conf;
         $this->user = $user;
+        $this->mode = $mode;
     }
 
     /** Parse the `format` request parameter, which selects how a GET renders
@@ -146,27 +166,37 @@ class Review_API extends MessageSet {
         $user = $this->user;
         if (!isset($qreq->p)) {
             return JsonResult::make_missing_error("p");
-        } else if (!isset($qreq->r)) {
+        }
+        [$fmt, ] = self::parse_get_format($qreq, false);
+        if (!isset($qreq->r) && $fmt !== "form") {
             return JsonResult::make_missing_error("r");
         }
         $fr = $prow ? $user->perm_view_paper($prow) : $qreq->annex("paper_whynot");
         if (!$prow || $fr) {
             return Conf::paper_error_json_result($fr);
         }
-        // the single endpoint has no ZIP formats, so the container is never set
-        list($fmt, ) = self::parse_get_format($qreq, false);
 
-        $rloc = $prow->parse_ordinal_id($qreq->r);
-        if ($rloc === false || $rloc === 0) {
-            return JsonResult::make_parameter_error("r");
-        } else if ($rloc < 0) {
-            $rrow = $prow->review_by_ordinal(-$rloc);
+        if (isset($qreq->r)) {
+            $rloc = $prow->parse_ordinal_id($qreq->r);
+            if ($rloc < 0) {
+                $rrow = $prow->review_by_ordinal(-$rloc);
+            } else if ($rloc > 0) {
+                $rrow = $prow->review_by_id($rloc);
+            } else {
+                $rrow = null;
+            }
         } else {
-            $rrow = $prow->review_by_id($rloc);
+            $rrow = $prow->review_by_user($user)
+                ?? ReviewInfo::make_blank($prow, $user);
         }
-        $fr = $user->perm_view_review($prow, $rrow);
-        if (!$rrow || $fr) {
-            $fr = $fr ?? $prow->failure_reason(["reviewNonexistent" => true]);
+        if (!$rrow) {
+            $fr = $user->no_review_whynot($prow, $qreq->r);
+        } else if ($rrow->reviewId) {
+            $fr = $user->perm_view_review($prow, $rrow);
+        } else {
+            $fr = $user->perm_view_blank_review_form($prow);
+        }
+        if ($fr) {
             return new JsonResult($fr->response_code(), [
                 "ok" => false, "message_list" => $fr->message_list(null, 2)
             ]);
@@ -199,18 +229,19 @@ class Review_API extends MessageSet {
             $srch = null;
             $prows = PaperInfoSet::make_singleton($prow);
         } else {
-            list($srch, $prows) = Paper_API::make_search($user, $qreq);
+            [$srch, $prows] = Paper_API::make_search($user, $qreq);
             $this->append_list($srch->message_list_with_default_field("q"));
         }
 
         if (isset($qreq->rq) && isset($qreq->u)) {
             JsonResult::make_parameter_error("rq", "<0>Supply at most one of `rq` and `u`")->complete();
         }
-        list($fmt, $zip) = self::parse_get_format($qreq, true);
+        [$fmt, $zip] = self::parse_get_format($qreq, true);
 
-        $rst = null;
+        $rst = $u = null;
         if (isset($qreq->u)) {
-            if (($u = $this->conf->user_by_email($qreq->u))) {
+            $u = $qreq->u === "me" ? $user : $this->conf->user_by_email($qreq->u);
+            if ($u) {
                 $rsm = new ReviewSearchMatcher;
                 $rsm->add_contact($u->contactId);
                 $rst = new Review_SearchTerm($user, $rsm);
@@ -224,13 +255,22 @@ class Review_API extends MessageSet {
             $srch = new PaperSearch($user, ["q" => $qreq->rq]);
             $rst = $srch->main_term(); // generates the messages collected next
             $this->append_list($srch->message_list_with_default_field("rq"));
+        } else if ($fmt === "form") {
+            $u = $user;
         }
 
         $rrows = [];
         foreach ($prows as $xprow) {
+            $got = count($rrows);
             foreach ($xprow->viewable_reviews_as_display($user) as $rrow) {
                 if (!$rst || $rst->test($xprow, $rrow))
                     $rrows[] = $rrow;
+            }
+            if ($fmt === "form"
+                && $got === count($rrows)
+                && $u
+                && $user->can_view_blank_review_form($xprow)) {
+                $rrows[] = ReviewInfo::make_blank($xprow, $u);
             }
         }
 
@@ -251,6 +291,20 @@ class Review_API extends MessageSet {
             "message_list" => $this->message_list(),
             "reviews" => $rjs
         ]);
+    }
+
+    /** @param ReviewInfo $rrow
+     * @param bool $full
+     * @param bool $isform
+     * @return string */
+    private function download_filename($rrow, $full, $isform) {
+        $fn = $full ? $this->conf->download_prefix . "review" : "review";
+        if ($isform && $rrow->contactId === $this->user->contactId) {
+            $fn .= $rrow->prow->paperId;
+        } else {
+            $fn .= $rrow->unparse_ordinal_id();
+        }
+        return $full ? $fn . ".txt" : $fn;
     }
 
     /** Render `$rrows` as a text download rather than JSON.
@@ -279,8 +333,7 @@ class Review_API extends MessageSet {
                 $t = $isform
                     ? $rf->text_form_header(false) . $rf->text_form($rrow->prow, $rrow, $user) . "\n"
                     : $rf->unparse_text($rrow->prow, $rrow, $user);
-                $fn = $conf->download_prefix . "review" . $rrow->unparse_ordinal_id() . ".txt";
-                if (($doc = $dset->add_string_as($t, $fn))
+                if (($doc = $dset->add_string_as($t, $this->download_filename($rrow, true, $isform)))
                     && ($time = $rrow->mtime($user)) > 0) {
                     $doc->set_timestamp($time);
                 }
@@ -323,7 +376,7 @@ class Review_API extends MessageSet {
         }
 
         $base = count($rrows) === 1
-            ? "review" . $rrows[0]->unparse_ordinal_id()
+            ? $this->download_filename($rrows[0], false, $isform)
             : "reviews";
         // Validate by content ETag; the rendering also depends on the
         // selection, on what this caller may see, and on the review form, so no
@@ -342,14 +395,13 @@ class Review_API extends MessageSet {
      * a cross-paper batch. The paper comes from the URL `p` or, for JSON/text,
      * from the body (these endpoints are not `paper:true`, so an absent `p` is
      * not rejected up front).
-     * @param 1|2|4 $mode
      * @return JsonResult */
-    private function run_post(Qrequest $qreq, ?PaperInfo $prow, $mode) {
+    private function run_post(Qrequest $qreq, ?PaperInfo $prow) {
         // an explicit but unresolvable `p` is a hard error
         if (!$prow && isset($qreq->p)) {
             return Conf::paper_error_json_result($qreq->annex("paper_whynot"));
         }
-        $one = ($mode & DocumentLocator::M_ONE) !== 0;
+        $one = ($this->mode & DocumentLocator::M_ONE) !== 0;
 
         $this->set_post_param($qreq);
         $this->qreq_r = isset($qreq->r) ? (string) $qreq->r : null;
@@ -371,7 +423,7 @@ class Review_API extends MessageSet {
         // format; otherwise the request body's content type does. An explicit
         // `json` parameter (like `upload`) is an inline JSON payload obeyed
         // regardless of the body, so it skips the text/form body paths.
-        $docloc = new DocumentLocator;
+        $docloc = new DocumentLocator($this->conf);
         $updoc = $docloc->uploaded_document($qreq);
         $bct = $updoc ? $updoc->mimetype : ($qreq->body_content_type() ?? Mimetype::FORM_DATA_TYPE);
 
@@ -404,7 +456,7 @@ class Review_API extends MessageSet {
 
         // a JSON object is one review; a JSON array is a batch (reviews have no
         // search-match mode)
-        list($jp, $jmode) = $docloc->parse_json_request($qreq, $mode & ~DocumentLocator::M_MATCH);
+        [$jp, $jmode] = $docloc->parse_json_request($qreq, $this->mode & ~DocumentLocator::M_MATCH);
         if ($jmode === DocumentLocator::M_ONE) {
             return $this->run_post_single_json($prow, $jp);
         }
@@ -430,7 +482,7 @@ class Review_API extends MessageSet {
         }
 
         // resolve the target review; empty/`0` addresses the caller's own review
-        list($ok, $rrow) = $this->post_target(isset($qreq->r) ? (string) $qreq->r : "");
+        [$ok, $rrow] = $this->post_target(isset($qreq->r) ? (string) $qreq->r : "");
         if ($ok && !$rrow) {
             $rrow = $prow->review_by_user($this->user);
             if (!$rrow) {
@@ -450,24 +502,35 @@ class Review_API extends MessageSet {
         $ius_conflict = $this->if_unmodified_since !== null
             && $this->if_unmodified_since < $rrow->reviewModified;
         $conflict = $vtag_conflict || $ius_conflict;
+        $ordid = $rrow->unparse_ordinal_id(); // deletion clears `reviewId`
         if ($conflict) {
             $this->error_at($vtag_conflict ? "if_vtag_match" : "if_unmodified_since",
                 $this->conf->_("<5><strong>Edit conflict</strong>: The review was edited concurrently"));
             $valid = false;
-        } else if ($this->dry_run) {
+        } else if ($this->dry_run_here) {
             $valid = true;
         } else {
             $valid = $rrow->delete($this->user, ["no_rights" => true, "snapshot" => true]);
         }
 
-        $this->status_list[] = new Review_API_Status($this->message_count(),
-            $valid, ["delete"], $conflict, $prow->paperId, $rrow->unparse_ordinal_id());
+        $this->status_list[] = new Review_API_Status($this->message_count(), $this->dry_run_here,
+            $valid, ["delete"], $conflict, $prow->paperId, $ordid);
         $this->reviews[] = null;
         return $this->post_result();
     }
 
     private function set_post_param(Qrequest $qreq) {
-        $this->dry_run = friendly_boolean($qreq->dry_run) ?? false;
+        if (isset($qreq->dry_run)) {
+            if ($qreq->dry_run === "if_warning") {
+                $this->dry_run_if_warning = true;
+            } else if ($qreq->dry_run === "if_error") {
+                $this->dry_run_if_error = true;
+            } else if (($dr = friendly_boolean($qreq->dry_run)) !== null) {
+                $this->dry_run = $dr;
+            } else {
+                JsonResult::make_parameter_error("dry_run")->complete();
+            }
+        }
         $this->notify = friendly_boolean($qreq->notify) !== false;
         $this->create_users = friendly_boolean($qreq->create_users);
         if ($this->user->privChair && friendly_boolean($qreq->disable_users)) {
@@ -488,6 +551,9 @@ class Review_API extends MessageSet {
             }
             $this->if_unmodified_since = $t;
         }
+        if (($this->mode & DocumentLocator::M_ONE) !== 0) {
+            $this->link_fields = friendly_boolean($qreq->link_fields) === true;
+        }
     }
 
     /** Naming an unknown reviewer creates their account, as an assignment does;
@@ -502,7 +568,9 @@ class Review_API extends MessageSet {
             ->set_reviewer($this->qreq_reviewer)
             ->set_require_reviewer($this->qreq_reviewer_none)
             ->set_create_users($this->create_users ?? $deliberate_reviewer)
-            ->set_disable_users($this->disable_users);
+            ->set_disable_users($this->disable_users)
+            ->set_expected_pid($this->prow && ($this->mode & DocumentLocator::M_ONE) !== 0 ? $this->prow->paperId : null)
+            ->set_link_message_fields($this->link_fields);
     }
 
     /** Save one review from a plain form POST on `$prow`, or — when the form
@@ -536,13 +604,24 @@ class Review_API extends MessageSet {
         $this->prow = $prow;
         $rv = $this->make_rv(false)->set_text(convert_to_utf8($content), $filename);
         $override = friendly_boolean($qreq->override) ?? false;
+        // an upload for a specific review (`r`) saves into that review; the
+        // form itself names only a reviewer
+        $rrow = null;
+        if ($prow !== null) {
+            [$ok, $rrow] = $this->post_target($this->qreq_r);
+            if (!$ok) {
+                $this->single = true;
+                $this->execute_fail();
+                return $this->post_result();
+            }
+        }
         $nmatch = $nother = 0;
         while ($rv->set_req_override($override)->parse_text()) {
             if ($prow === null || $rv->req_pid() === $prow->paperId) {
                 ++$nmatch;
                 $this->reset_item();
                 $this->apply_precondition($rv, null);
-                $this->execute_save($rv, null);
+                $this->execute_save($rv, $rrow);
             } else {
                 // ignore reviews for other submissions, dropping their messages
                 ++$nother;
@@ -551,14 +630,13 @@ class Review_API extends MessageSet {
             $rv->clear_req();
         }
         // merge any trailing parse messages (e.g. a garbage warning)
-        foreach ($rv->message_list() as $mi) {
-            $this->append_item($mi);
-        }
+        $this->merge_messages($rv);
         // the single endpoint collapses to one item; the batch endpoint uses the
         // list shape
         $this->single = $prow !== null && $nmatch <= 1;
         if ($nmatch === 0) {
             // record a failure item so the result reports `ok:false`
+            $this->reset_item();
             if ($prow !== null && $nother > 0) {
                 $this->error_at(null, $this->conf->_("<0>Uploaded form was not for this {submission}"));
             } else {
@@ -614,7 +692,7 @@ class Review_API extends MessageSet {
         $rv->parse_json($jp);
         // the URL `r` selects the target review; a body `rid` (now in the
         // request) is reconciled against it by prepare_save
-        list($ok, $rrow) = $this->post_target($this->qreq_r);
+        [$ok, $rrow] = $this->post_target($this->qreq_r);
         if (!$ok) {
             $this->execute_fail();
         } else {
@@ -625,8 +703,18 @@ class Review_API extends MessageSet {
     }
 
 
+    /** Move `$rv`'s messages into the response, with decoration
+     * @param ReviewValues $rv */
+    private function merge_messages($rv) {
+        foreach ($rv->message_list() as $mi) {
+            $this->append_item($rv->decorate_message($mi));
+        }
+        $rv->clear_messages();
+    }
+
     /** Reset the current-item working state before processing an item. */
     private function reset_item() {
+        $this->dry_run_here = $this->dry_run;
         $this->status = 200;
         $this->stale = false;
         $this->ivalid = false;
@@ -640,7 +728,7 @@ class Review_API extends MessageSet {
      * @param ReviewValues $rv
      * @param ?string $r */
     private function save_item($rv, $r) {
-        list($ok, $rrow) = $this->post_target($r);
+        [$ok, $rrow] = $this->post_target($r);
         if (!$ok) {
             $this->execute_fail();
             return;
@@ -694,27 +782,24 @@ class Review_API extends MessageSet {
             return [true, null];
         }
         if (!$this->prow) {
-            // a specific review can only be addressed with a URL paper
+            // a specific review can only be addressed when the paper is too
             $this->error_at("r", "<0>{Submission} required");
             return [false, null];
         }
         $rloc = $this->prow->parse_ordinal_id($r);
-        if ($rloc === false || $rloc === 0) {
-            $this->status = 404;
-            $this->error_at("r", "<0>Review not found");
-            return [false, null];
+        if ($rloc < 0) {
+            $rrow = $this->prow->review_by_ordinal(-$rloc);
+        } else if ($rloc > 0) {
+            $rrow = $this->prow->review_by_id($rloc);
+        } else {
+            $rrow = null;
         }
-        $rrow = $rloc < 0
-            ? $this->prow->review_by_ordinal(-$rloc)
-            : $this->prow->review_by_id($rloc);
-        if (!$rrow) {
-            $this->status = 404;
-            $this->error_at("r", "<0>Review not found");
-            return [false, null];
+        if ($rrow) {
+            $fr = $this->user->perm_view_review($this->prow, $rrow);
+        } else {
+            $fr = $this->user->no_review_whynot($this->prow, $r);
         }
-        // an unviewable review the caller may not know exists reads as
-        // `reviewNonexistent` (404), so this never leaks its existence
-        if (($fr = $this->user->perm_view_review($this->prow, $rrow))) {
+        if ($fr) {
             $this->status = $fr->response_code();
             $fr->append_to($this, "r", MessageSet::ERROR);
             return [false, null];
@@ -743,25 +828,32 @@ class Review_API extends MessageSet {
             || $rv->has_problem_at("if_unmodified_since");
         $this->change_list = $rv->change_list(true);
 
-        if ($prepared && !$this->dry_run) {
+        // `dry_run=if_warning` withholds this item's save if staging it
+        // produced a warning, `dry_run=if_error` if it produced an error; for
+        // error messages, `stale` wins
+        if ((($this->dry_run_if_warning && $rv->has_problem())
+             || ($this->dry_run_if_error && $rv->has_error()))
+            && !$this->stale) {
+            $this->dry_run_here = true;
+        }
+
+        if ($prepared && !$this->dry_run_here) {
             // commit
             $this->ivalid = $rv->execute_save();
         } else {
             // dry run, conflict, or validation failure: revert without saving
             $rv->abort_save();
-            $this->ivalid = $prepared && $this->dry_run;
+            $this->ivalid = $prepared && $this->dry_run_here;
         }
-
-        // merge the engine's messages into the response, then clear them so a
-        // shared parser (multi-review text upload) starts each review fresh
-        foreach ($rv->message_list() as $mi) {
-            $this->append_item($mi);
-        }
-        $rv->clear_messages();
+        $this->merge_messages($rv);
 
         $prow = $this->prow ?? $rv->saved_prow();
         $rid = null;
-        if ($this->ivalid && !$this->dry_run && $rv->reviewId && $prow) {
+        if (!$prepared && $rv->was_blank()) {
+            $this->warning_at(null, $this->conf->_("<5>Ignored blank reviews for {:list}", ["#{$prow->paperId}"]));
+            $this->inform_at(null, "<0>Fill out the form and upload it again.");
+        }
+        if ($this->ivalid && !$this->dry_run_here && $rv->reviewId && $prow) {
             $rid = $rv->review_ordinal_id;
             $rrow2 = $prow->fresh_review_by_id($rv->reviewId);
             $this->reviews[] = (new PaperExport($this->user))->review_json($prow, $rrow2);
@@ -770,7 +862,7 @@ class Review_API extends MessageSet {
             $this->reviews[] = null;
         }
         $this->status_list[] = new Review_API_Status(
-            $this->message_count(),
+            $this->message_count(), $this->dry_run_here,
             $this->ivalid, $this->change_list ?? [],
             $this->stale, $prow ? $prow->paperId : null, $rid
         );
@@ -778,7 +870,7 @@ class Review_API extends MessageSet {
 
     /** Record a per-item resolution failure (no save attempted). */
     private function execute_fail() {
-        $this->status_list[] = new Review_API_Status($this->message_count());
+        $this->status_list[] = new Review_API_Status($this->message_count(), $this->dry_run_here);
         $this->reviews[] = null;
     }
 
@@ -800,17 +892,20 @@ class Review_API extends MessageSet {
         // generate result
         $ok = empty($this->status_list)
             || array_find($this->status_list, function ($x) { return !!$x->valid; });
+        // every failure must explain itself: the response drops an empty
+        // `message_list`, so a silent failure would arrive as `{ok: false}` alone
+        if (!$ok && !$this->has_message()) {
+            $this->error_at(null, "<0>Internal error");
+        }
+        // 400 status only when nothing was valid
         $status = $this->single ? $this->status : 200;
-        if ($this->single && $status === 200 && $this->has_error()) {
+        if ($this->single && $status === 200 && !$ok && $this->has_error()) {
             $status = 400;
         }
         $jr = new JsonResult($status, [
             "ok" => $ok,
             "message_list" => $this->message_list()
         ]);
-        if ($this->dry_run) {
-            $jr->content["dry_run"] = true;
-        }
         if ($this->single) {
             // omit `pid`: the URL pins the paper
             foreach ($this->status_list[0]->jsonSerialize() as $k => $v) {
@@ -822,6 +917,9 @@ class Review_API extends MessageSet {
                 $jr->content["review"] = $this->reviews[0];
             }
         } else {
+            if ($this->dry_run) { // XXX backward compat, use the ones in `status_list`
+                $jr->content["dry_run"] = true;
+            }
             $jr->content["status_list"] = $this->status_list;
             if (!$this->dry_run) {
                 $jr->content["reviews"] = $this->reviews;
@@ -838,7 +936,7 @@ class Review_API extends MessageSet {
             $user->add_overrides(Contact::OVERRIDE_CONFLICT);
         }
         try {
-            $rapi = new Review_API($user);
+            $rapi = new Review_API($user, $mode);
             if ($qreq->is_getlike()) {
                 if ($mode === DocumentLocator::M_ONE) {
                     $jr = $rapi->run_get_one($qreq, $prow);
@@ -848,7 +946,7 @@ class Review_API extends MessageSet {
             } else if ($qreq->method() === "DELETE") {
                 $jr = $rapi->run_delete($qreq, $prow);
             } else {
-                $jr = $rapi->run_post($qreq, $prow, $mode);
+                $jr = $rapi->run_post($qreq, $prow);
             }
         } catch (JsonCompletion $jc) {
             $jr = $jc->result;

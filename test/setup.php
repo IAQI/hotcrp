@@ -262,6 +262,16 @@ class RequireCdb {
 }
 
 #[Attribute]
+class RequireClass {
+    /** @var string */
+    public $class;
+    /** @param string $class */
+    function __construct($class) {
+        $this->class = $class;
+    }
+}
+
+#[Attribute]
 class RequireDb {
     /** @var bool|'fresh' */
     public $required;
@@ -368,6 +378,8 @@ class Xassert {
         ++self::$nerror;
     }
 
+    static public $export_maxlen = 120;
+
     /** @param string $xprefix
      * @param string $eprefix
      * @param mixed $expected
@@ -375,8 +387,8 @@ class Xassert {
      * @param mixed $actual
      * @return string */
     static function match_failure_message($xprefix, $eprefix, $expected, $aprefix, $actual) {
-        $estr = xassert_var_export($expected);
-        $astr = xassert_var_export($actual);
+        $estr = xassert_var_export($expected, self::$export_maxlen);
+        $astr = xassert_var_export($actual, self::$export_maxlen);
         if (strlen($estr) < 20 && strlen($astr) < 20) {
             return "{$xprefix}{$eprefix}{$estr}{$aprefix}{$astr}\n";
         } else {
@@ -477,6 +489,11 @@ class Xassert {
         self::$retry = $r;
         $f();
     }
+
+    /** @return int */
+    static function verbosity() {
+        return self::$test_runner->verbose ?? 0;
+    }
 }
 
 /** @param int $errno
@@ -499,24 +516,24 @@ function xassert_error_handler($errno, $emsg, $file, $line) {
 set_error_handler("xassert_error_handler");
 
 /** @param mixed $x
+ * @param ?int $maxlen
  * @return string */
-function xassert_var_export($x) {
+function xassert_var_export($x, $maxlen = 120) {
     if (is_scalar($x)) {
-        return json_encode($x);
+        return json_encode_db($x);
     } else if (is_object($x)) {
         $cn = get_class($x);
         $ch = spl_object_id($x);
         $xp = "[{$cn}#{$ch}]";
-        if (($s = json_encode($x))) {
-            $s = strlen($s) > 120 ? substr($s, 0, 120) . "...}" : $s;
+        if (($s = json_encode_db($x))) {
+            $s = $maxlen !== null && strlen($s) > $maxlen ? substr($s, 0, $maxlen) . "...}" : $s;
             $xp .= $s;
         }
         return $xp;
-    } else if (($s = json_encode($x))) {
-        return strlen($s) > 121 ? substr($s, 0, 120) . "..." : $s;
-    } else {
-        return "[" . gettype($s) . "]";
+    } else if (($s = json_encode_db($x))) {
+        return $maxlen !== null && strlen($s) > $maxlen ? substr($s, 0, $maxlen) . "..." : $s;
     }
+    return "[" . gettype($s) . "]";
 }
 
 /** @param mixed $x
@@ -708,11 +725,15 @@ function xassert_str_ends_with($haystack, $needle) {
  * @param string $needle
  * @return bool */
 function xassert_str_contains($haystack, $needle) {
-    $ok = strpos($haystack, $needle) !== false;
+    $ok = false;
+    foreach (is_array($needle) ? $needle : [$needle] as $str) {
+        $ok = $ok || str_contains($haystack, $str);
+    }
     if ($ok) {
         Xassert::succeed();
     } else {
-        Xassert::fail_with("expected `{$haystack}` to contain `{$needle}`");
+        $expect = join("` or `", is_array($needle) ? $needle : [$needle]);
+        Xassert::fail_with("expected `{$haystack}` to contain `{$expect}`");
     }
     return $ok;
 }
@@ -721,11 +742,15 @@ function xassert_str_contains($haystack, $needle) {
  * @param string $needle
  * @return bool */
 function xassert_not_str_contains($haystack, $needle) {
-    $ok = strpos($haystack, $needle) === false;
+    $ok = true;
+    foreach (is_array($needle) ? $needle : [$needle] as $str) {
+        $ok = $ok && !str_contains($haystack, $str);
+    }
     if ($ok) {
         Xassert::succeed();
     } else {
-        Xassert::fail_with("expected `{$haystack}` to not contain `{$needle}`");
+        $expect = join("` or `", is_array($needle) ? $needle : [$needle]);
+        Xassert::fail_with("expected `{$haystack}` to not contain `{$expect}`");
     }
     return $ok;
 }
@@ -765,11 +790,11 @@ function xassert_array_eqq($actual, $expected, $sort = false) {
     } else {
         $ml = ["Array assertion failed, {$problem}\n"];
         if ($sort) {
-            $aj = json_encode(array_slice($actual, 0, 10));
+            $aj = json_encode_db(array_slice($actual, 0, 10));
             if (count($actual) > 10) {
                 $aj .= "...";
             }
-            $bj = json_encode(array_slice($expected, 0, 10));
+            $bj = json_encode_db(array_slice($expected, 0, 10));
             if (count($expected) > 10) {
                 $bj .= "...";
             }
@@ -823,7 +848,7 @@ function xassert_int_list_eqq($actual, $expected) {
  * @return array<int,array> */
 function search_json($user, $query, $cols = "id", $allow_warnings = false) {
     $pl = new PaperList("empty", new PaperSearch($user, $query));
-    $pl->parse_view($cols, PaperList::VIEWORIGIN_MAX);
+    $pl->parse_view($cols, ViewCommand::ORIGIN_MAX);
     if ($pl->has_problem() && !$allow_warnings) {
         Xassert::will_print();
         list($first, $rest) = Xassert::landmark(true);
@@ -832,13 +857,31 @@ function search_json($user, $query, $cols = "id", $allow_warnings = false) {
     return $pl->text_json();
 }
 
+/** Return the HTML cells `$pl` renders, as a map from paper ID to a map
+ * from column name to HTML.
+ * @return array<int,array<string,string>> */
+function paper_list_html_cells(PaperList $pl) {
+    $cells = [];
+    foreach ($pl->format_json(PaperList::FORMAT_HTML)["papers"] as $p) {
+        $pid = $p["pid"];
+        unset($p["pid"], $p["\$attributes"]);
+        foreach ($p as &$v) {
+            if (is_array($v))
+                $v = $v["html"];
+        }
+        unset($v);
+        $cells[$pid] = $p;
+    }
+    return $cells;
+}
+
 /** @param Contact $user
  * @param string|array $query
  * @param string $col
  * @return string */
 function search_text_col($user, $query, $col = "id") {
     $pl = new PaperList("empty", new PaperSearch($user, $query));
-    $pl->parse_view($col, PaperList::VIEWORIGIN_MAX);
+    $pl->parse_view($col, ViewCommand::ORIGIN_MAX);
     $tj = $pl->text_json();
     $colx = ($pl->vcolumns())[0]->name;
     $x = [];
@@ -877,6 +920,22 @@ function xassert_search_ignore_warnings($user, $query, $expected) {
 /** @return bool */
 function assert_query($q, $b) {
     return xassert_eqq(join("\n", Dbl::fetch_first_columns($q)), $b);
+}
+
+/** Return how many table rows the database has read for this connection so
+ * far: a sum of MySQL/MariaDB `Handler_read%` session status counters -- a
+ * measure of work, not of time, but one that depends on the storage engine
+ * and query plans, so only good for order-of-magnitude checks that an
+ * operation’s cost does not blow up.
+ * @return int */
+function db_rows_read(Conf $conf) {
+    $n = 0;
+    $result = $conf->qe_raw("show session status like 'Handler_read%'");
+    while (($row = $result->fetch_row())) {
+        $n += (int) $row[1];
+    }
+    Dbl::free($result);
+    return $n;
 }
 
 /** @return int */
@@ -1012,6 +1071,10 @@ function call_api_result($fn, $user, $qreq, $prow = null) {
         $qreq->set_header("Authorization", "Bearer {$token->salt}");
         $qreq->approve_token();
         $user = clone $token->local_user();
+        // as `initialize_user`: this harness stands in for it
+        if (!Authorization_Token::check_allow_if($token, $user)) {
+            return JsonResult::make_error(401, "<0>Unauthorized");
+        }
         $user->set_bearer_authorized();
         $user->set_scope($token->data("scope"));
     } else {
@@ -1047,7 +1110,7 @@ function call_api($fn, $user, $qreq, $prow = null) {
     if (!isset($jr->content["status_code"]) && $jr->status > 299) {
         $jr->content["status_code"] = $jr->status;
     }
-    return (object) $jr->content;
+    return (object) $jr->jsonSerialize();
 }
 
 /** @param Conf $conf
@@ -1273,10 +1336,8 @@ class TestRunner {
             $stmt = $m[1];
             $s = substr($s, strlen($m[0]));
             if (preg_match('/\ACREATE\s*TABLE\s*\`(.*?)\`/i', $stmt, $m)) {
+                // TRUNCATE also resets AUTO_INCREMENT
                 $truncates[] = "TRUNCATE TABLE `{$m[1]}`;\n";
-                if (stripos($stmt, "auto_increment") !== false) {
-                    $truncates[] = "ALTER TABLE `{$m[1]}` AUTO_INCREMENT=0;\n";
-                }
             } else if (!preg_match('/\ADROP\s*TABLE\s*(?:IF\s*EXISTS\s*|)\`.*?\`;\z/', $stmt)) {
                 $rebuild = true;
                 break;
@@ -1429,11 +1490,17 @@ class TestRunner {
         if (!$this->verbose) {
             return;
         }
-        $mpfx = str_pad("{$ro->getName()}::{$m->name} ", $this->width, ".");
-        if (strlen($mpfx) > $this->width) {
-            $mpfx = rtrim($mpfx);
+        $digits = sprintf("[%{$this->test_digits}d/%d]", $this->test_index, $this->test_count);
+        $method = $ro->getName() . "::" . $m->name;
+        $dots = str_repeat(".", max(0, $this->width - strlen($digits) - strlen($method) - 2));
+        if (strlen($digits) + 1 + strlen($method) < $this->width) {
+            $dots = " " . $dots;
         }
-        $this->verbose_test = $mpfx;
+        if ($this->color) {
+            $this->verbose_test = "\x1b[38;2;212;23;67m{$digits} \x1b[38;2;70;100;150m{$method}\x1b[1;90m{$dots}\x1b[m";
+        } else {
+            $this->verbose_test = $digits . " " . $method . $dots;
+        }
     }
 
     /** @param object $testo
@@ -1515,6 +1582,10 @@ class TestRunner {
             && $require_cdb !== !!$this->conf->opt("contactdbDsn")) {
             return false;
         }
+        foreach ($class->getAttributes("RequireClass") ?? [] as $attr) {
+            if (!class_exists($attr->newInstance()->class, false))
+                return false;
+        }
         if ($require_db === false) {
             $this->need_fresh = false;
         } else if ($require_db === "fresh") {
@@ -1534,6 +1605,10 @@ class TestRunner {
             $this->tester = null;
         }
 
+        if ($test === "") {
+            return;
+        }
+
         $need_fresh = $this->need_fresh;
         $class = new ReflectionClass($test);
         if (!$this->check_test_attributes($class)) {
@@ -1546,6 +1621,11 @@ class TestRunner {
 
         // prepare database
         if ($this->reset ?? $this->need_fresh) {
+            if ($this->color && !$this->verbose) {
+                fwrite(STDERR, sprintf("\r\x1b[38;2;212;23;67m[%{$this->test_digits}d/%d] \x1b[38;2;70;100;150m%s...\x1b[m \x1b[K",
+                                       $this->test_index - 1, $this->test_count, "(reset database)"));
+                $this->need_newline = true;
+            }
             self::reset_db($this->reset ?? false);
             $this->need_fresh = false;
             $this->reset = null;
@@ -1600,6 +1680,10 @@ class TestRunner {
         $this->save_stack = $this->save_stack->next;
     }
 
+    private static $special_tests = [
+        "no_argv", "(", ")", "if_all", "no_cdb", "reset_db", "fresh_db"
+    ];
+
     /** @param string $test */
     private function run_test($test) {
         if ($test === "no_argv") {
@@ -1634,11 +1718,7 @@ class TestRunner {
             return;
         }
 
-        if ($this->color && !$this->verbose) {
-            fwrite(STDERR, sprintf("\r\x1b[38;2;212;23;67m[%{$this->test_digits}d/%d] \x1b[38;2;70;100;150m%s...\x1b[m \x1b[K",
-                                   $this->test_index, $this->test_count, $test));
-            $this->need_newline = true;
-        }
+        ++$this->test_index;
 
         $methodmatch = "";
         if (($pos = strpos($test, "::")) !== false) {
@@ -1654,22 +1734,46 @@ class TestRunner {
         if ($testclass !== $this->last_classname || $methodmatch === "") {
             $this->set_test_class($testclass);
         }
+
         if ($this->tester) {
+            if ($this->color && !$this->verbose) {
+                fwrite(STDERR, sprintf("\r\x1b[38;2;212;23;67m[%{$this->test_digits}d/%d] \x1b[38;2;70;100;150m%s...\x1b[m \x1b[K",
+                                       $this->test_index, $this->test_count, $test));
+                $this->need_newline = true;
+            }
             $this->run_object_tests($this->tester, $methodmatch);
         }
     }
 
     private function run_test_list($tests) {
+        // normalize tests
+        $skipstack = [];
+        $skipping = false;
+        $this->test_count = 0;
+        foreach ($tests as $t) {
+            if (!in_array($t, self::$special_tests)) {
+                if (!$skipping) {
+                    ++$this->test_count;
+                }
+            } else if ($t === "(") {
+                $skipstack[] = $skipping;
+            } else if ($t === ")") {
+                $skipping = array_pop($skipstack);
+            } else if ($t === "if_all" && !$this->all) {
+                $skipping = true;
+            }
+        }
+
         $this->test_index = 0;
-        $this->test_count = count($tests);
         $this->test_digits = (int) floor(log10(max($this->test_count, 1))) + 1;
-        foreach ($tests as $test) {
-            ++$this->test_index;
-            $this->run_test($test);
+        foreach ($tests as $t) {
+            $this->run_test($t);
         }
         if ($this->color && !$this->verbose) {
             fwrite(STDERR, "\r\x1b[K");
         }
+        // run last `finalize` method if any
+        $this->set_test_class("");
     }
 
     private function expand($tests) {
@@ -1730,6 +1834,7 @@ class TestRunner {
                         fwrite(STDERR, "* All test databases are in use; sharing {$lfx[$i]}\n");
                     }
                     include $lfx[$i];
+                    putenv("HOTCRP_DBLOCKFILE={$lfx[$i]}");
                     return $strm;
                 }
                 if ($strm !== false) {
@@ -1798,6 +1903,16 @@ class TestRunner {
 
 
 class TestQreq {
+    /** @param Contact $user
+     * @param Qrequest $qreq
+     * @param ?Qsession $qs
+     * @return Qrequest */
+    static function apply_user($user, $qreq, ?Qsession $qs = null) {
+        $qs = $qs ?? new MemoryQsession;
+        $user->has_email() ? $qs->set("u", $user->email) : $qs->unset("u");
+        return $qreq->set_user($user)->set_qsession($qs);
+    }
+
     /** @param array<string,mixed> $args
      * @return Qrequest */
     static function get($args = []) {
@@ -1816,12 +1931,36 @@ class TestQreq {
     }
 
     /** @param array<string,mixed> $args
+     * @param ?Qsession $qs
+     * @return Qrequest */
+    static function user_get(Contact $user, $args = [], ?Qsession $qs = null) {
+        return self::apply_user($user, self::get($args), $qs);
+    }
+
+    /** @param array<string,mixed> $args
      * @return Qrequest */
     static function post($args = []) {
         return (new Qrequest("POST", $args))
             ->set_navigation(Navigation::get())
             ->approve_token()
             ->set_body(null, "application/x-www-form-urlencoded");
+    }
+
+    /** `post` approves the token, so a test that means to check the token
+     * has to start here instead.
+     * @param array<string,mixed> $args
+     * @return Qrequest */
+    static function unapproved_post($args = []) {
+        return (new Qrequest("POST", $args))
+            ->set_navigation(Navigation::get())
+            ->set_body(null, "application/x-www-form-urlencoded");
+    }
+
+    /** @param array<string,mixed> $args
+     * @param ?Qsession $qs
+     * @return Qrequest */
+    static function user_post(Contact $user, $args = [], ?Qsession $qs = null) {
+        return self::apply_user($user, self::post($args), $qs);
     }
 
     /** @param string $page
@@ -1870,5 +2009,77 @@ class TestQreq {
         return (new Qrequest("DELETE", $args))
             ->approve_token()
             ->set_body(null, "application/x-www-form-urlencoded");
+    }
+}
+
+/** Test session handler: sessions persist across instances (“requests”)
+ * in a shared store keyed by ID, as with `PHPQsession` */
+class TestQsession extends Qsession {
+    /** @var array<string,array<string,mixed>> */
+    static public $store = [];
+    /** @var list<?string> */
+    static public $cookies = [];
+
+    /** @return void */
+    static function reset() {
+        self::$store = self::$cookies = [];
+        unset($_COOKIE[session_name()]);
+    }
+
+    /** @param ?string $cookie_sid
+     * @return TestQsession */
+    static function start_request($cookie_sid) {
+        if ($cookie_sid === null) {
+            unset($_COOKIE[session_name()]);
+        } else {
+            $_COOKIE[session_name()] = $cookie_sid;
+        }
+        self::$cookies = [];
+        return new TestQsession;
+    }
+
+    function start($sid) {
+        $sid = $sid ?? $this->new_sid();
+        $this->assign_open($sid, self::$store[$sid] ?? []);
+    }
+
+    function new_sid() {
+        return "sess_" . base64_encode(random_bytes(15));
+    }
+
+    function commit() {
+        if ($this->sopen) {
+            self::$store[$this->sid] = $this->sv;
+            $this->assign_commit();
+        }
+    }
+
+    function refresh() {
+        self::$cookies[] = $this->sid;
+    }
+
+    function set($key, $value) {
+        assert($this->sopen);
+        $this->sv[$key] = $value;
+    }
+
+    function unset($key) {
+        assert($this->sopen);
+        unset($this->sv[$key]);
+    }
+
+    function set2($key1, $key2, $value) {
+        assert($this->sopen);
+        $this->sv[$key1][$key2] = $value;
+    }
+
+    function unset2($key1, $key2) {
+        assert($this->sopen);
+        if (isset($this->sv[$key1])) {
+            unset($this->sv[$key1][$key2]);
+            if (empty($this->sv[$key1])) {
+                unset($this->sv[$key1]);
+            }
+        }
     }
 }

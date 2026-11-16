@@ -53,6 +53,7 @@ class ResponseRound {
         }
         if ($this->_condition_term === null) {
             $s = new PaperSearch($prow->conf->root_user(), $this->condition);
+            $s->set_use_viewer_permissions(true);
             $this->_condition_term = $s->full_term();
         }
         return $this->_condition_term->test($prow, null);
@@ -98,6 +99,11 @@ class ResponseRound {
     /** @return string */
     function tag_name() {
         return $this->unnamed ? "unnamedresponse" : $this->name . "response";
+    }
+
+    /** @return string */
+    function id_name() {
+        return $this->unnamed ? "response" : $this->name . "response";
     }
 
     /** @return string */
